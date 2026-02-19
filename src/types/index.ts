@@ -210,6 +210,8 @@ export type LangGraphProvider = 'anthropic' | 'openai' | 'ollama'
 
 export interface AppSettings {
   userPrompt?: string
+  userName?: string
+  setupCompleted?: boolean
   langGraphProvider?: LangGraphProvider
   langGraphModel?: string
   langGraphCredentialId?: string | null

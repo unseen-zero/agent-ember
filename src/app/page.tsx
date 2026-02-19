@@ -6,6 +6,7 @@ import { initAudioContext } from '@/lib/tts'
 import { getStoredAccessKey, clearStoredAccessKey, api } from '@/lib/api-client'
 import { AccessKeyGate } from '@/components/auth/access-key-gate'
 import { UserPicker } from '@/components/auth/user-picker'
+import { SetupWizard } from '@/components/auth/setup-wizard'
 import { AppLayout } from '@/components/layout/app-layout'
 
 export default function Home() {
@@ -18,6 +19,7 @@ export default function Home() {
 
   const [authChecked, setAuthChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
+  const [setupDone, setSetupDone] = useState<boolean | null>(null)
 
   const checkAuth = useCallback(async () => {
     const key = getStoredAccessKey()
@@ -73,6 +75,26 @@ export default function Home() {
     return () => clearInterval(interval)
   }, [authenticated])
 
+  // Check if first-run setup is needed
+  useEffect(() => {
+    if (!authenticated || !currentUser) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const [settings, creds] = await Promise.all([
+          api<{ setupCompleted?: boolean }>('GET', '/settings'),
+          api<Record<string, unknown>>('GET', '/credentials'),
+        ])
+        if (cancelled) return
+        const hasCreds = Object.keys(creds).length > 0
+        setSetupDone(settings.setupCompleted === true || hasCreds)
+      } catch {
+        if (!cancelled) setSetupDone(true) // on error, skip wizard
+      }
+    })()
+    return () => { cancelled = true }
+  }, [authenticated, currentUser])
+
   useEffect(() => {
     const handler = () => {
       initAudioContext()
@@ -94,5 +116,7 @@ export default function Home() {
   if (!hydrated || !authChecked) return null
   if (!authenticated) return <AccessKeyGate onAuthenticated={() => setAuthenticated(true)} />
   if (!currentUser) return <UserPicker />
+  if (setupDone === null) return null
+  if (!setupDone) return <SetupWizard onComplete={() => setSetupDone(true)} />
   return <AppLayout />
 }
