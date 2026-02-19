@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
 import { createAgent, updateAgent, deleteAgent } from '@/lib/agents'
 import { api } from '@/lib/api-client'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
-import type { ProviderType, Skill, ClaudeSkill } from '@/types'
+import type { ProviderType, ClaudeSkill } from '@/types'
 
 const AVAILABLE_TOOLS: { id: string; label: string; description: string }[] = [
   { id: 'shell', label: 'Shell', description: 'Execute commands in the working directory' },
@@ -30,6 +30,8 @@ export function AgentSheet() {
   const loadCredentials = useAppStore((s) => s.loadCredentials)
   const dynamicSkills = useAppStore((s) => s.skills)
   const loadSkills = useAppStore((s) => s.loadSkills)
+  const appSettings = useAppStore((s) => s.appSettings)
+  const loadSettings = useAppStore((s) => s.loadSettings)
 
   const [claudeSkills, setClaudeSkills] = useState<ClaudeSkill[]>([])
   const [claudeSkillsLoading, setClaudeSkillsLoading] = useState(false)
@@ -58,6 +60,18 @@ export function AgentSheet() {
   const [fallbackCredentialIds, setFallbackCredentialIds] = useState<string[]>([])
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
 
+  const soulFileRef = useRef<HTMLInputElement>(null)
+  const promptFileRef = useRef<HTMLInputElement>(null)
+
+  const handleFileUpload = (setter: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => setter(ev.target?.result as string)
+    reader.readAsText(file)
+    e.target.value = ''
+  }
+
   // AI generation state
   const [aiPrompt, setAiPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
@@ -74,6 +88,7 @@ export function AgentSheet() {
       loadCredentials()
       loadSkills()
       loadClaudeSkills()
+      loadSettings()
       setAiPrompt('')
       setGenerating(false)
       setGenerated(false)
@@ -112,12 +127,14 @@ export function AgentSheet() {
         setOllamaMode('local')
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editingId])
 
   useEffect(() => {
     if (currentProvider?.models.length && !editing) {
       setModel(currentProvider.models[0])
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, providers])
 
   const handleGenerate = async () => {
@@ -137,8 +154,8 @@ export function AgentSheet() {
       } else {
         setGenError('AI returned empty response — try again')
       }
-    } catch (err: any) {
-      setGenError(err.message || 'Generation failed')
+    } catch (err: unknown) {
+      setGenError(err instanceof Error ? err.message : 'Generation failed')
     }
     setGenerating(false)
   }
@@ -234,6 +251,9 @@ export function AgentSheet() {
           {genError && (
             <p className="mt-2 text-[12px] text-red-400/80">{genError}</p>
           )}
+          <p className="mt-3 text-[11px] text-text-3/50">
+            Using {appSettings.langGraphModel || (appSettings.langGraphProvider === 'openai' ? 'gpt-4o' : appSettings.langGraphProvider === 'ollama' ? 'qwen3.5' : 'claude-sonnet-4-6')} via {appSettings.langGraphProvider || 'anthropic'}
+          </p>
         </div>
       )}
 
@@ -251,7 +271,11 @@ export function AgentSheet() {
         <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
           Soul / Personality <span className="normal-case tracking-normal font-normal text-text-3">(optional)</span>
         </label>
-        <p className="text-[12px] text-text-3/60 mb-3">Define the agent&apos;s voice, tone, and personality. Injected before the system prompt.</p>
+        <div className="flex items-center gap-2 mb-3">
+          <p className="text-[12px] text-text-3/60">Define the agent&apos;s voice, tone, and personality. Injected before the system prompt.</p>
+          <button onClick={() => soulFileRef.current?.click()} className="shrink-0 px-2 py-1 rounded-[8px] border border-white/[0.08] bg-surface text-[11px] text-text-3 hover:text-text-2 cursor-pointer transition-colors" style={{ fontFamily: 'inherit' }}>Upload .md</button>
+          <input ref={soulFileRef} type="file" accept=".md,.txt,.markdown" onChange={handleFileUpload(setSoul)} className="hidden" />
+        </div>
         <textarea
           value={soul}
           onChange={(e) => setSoul(e.target.value)}
@@ -263,7 +287,11 @@ export function AgentSheet() {
       </div>
 
       <div className="mb-8">
-        <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">System Prompt</label>
+        <div className="flex items-center gap-2 mb-3">
+          <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em]">System Prompt</label>
+          <button onClick={() => promptFileRef.current?.click()} className="shrink-0 px-2 py-1 rounded-[8px] border border-white/[0.08] bg-surface text-[11px] text-text-3 hover:text-text-2 cursor-pointer transition-colors" style={{ fontFamily: 'inherit' }}>Upload .md</button>
+          <input ref={promptFileRef} type="file" accept=".md,.txt,.markdown" onChange={handleFileUpload(setSystemPrompt)} className="hidden" />
+        </div>
         <textarea
           value={systemPrompt}
           onChange={(e) => setSystemPrompt(e.target.value)}
