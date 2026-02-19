@@ -88,6 +88,22 @@ export interface PluginMeta {
   description?: string
   filename: string
   enabled: boolean
+  author?: string
+  version?: string
+  source?: 'local' | 'marketplace'
+  openclaw?: boolean
+}
+
+export interface MarketplacePlugin {
+  id: string
+  name: string
+  description: string
+  author: string
+  version: string
+  url: string
+  tags: string[]
+  openclaw: boolean
+  downloads: number
 }
 
 export interface SSEEvent {

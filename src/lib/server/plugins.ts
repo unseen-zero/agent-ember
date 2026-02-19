@@ -6,6 +6,59 @@ import type { Plugin, PluginHooks, PluginMeta } from '@/types'
 const PLUGINS_DIR = path.join(process.cwd(), 'data', 'plugins')
 const PLUGINS_CONFIG = path.join(process.cwd(), 'data', 'plugins.json')
 
+// OpenClaw plugin format: { name, version, activate(ctx), deactivate() }
+interface OpenClawPlugin {
+  name: string
+  version?: string
+  activate: (ctx: Record<string, (fn: (...args: any[]) => any) => void>) => void
+  deactivate?: () => void
+}
+
+/**
+ * Normalize a module export into SwarmClaw's Plugin interface.
+ * Supports both SwarmClaw format ({ name, hooks }) and OpenClaw format
+ * ({ name, activate(ctx) }) where activate receives event hook registrars.
+ */
+function normalizePlugin(mod: any): Plugin | null {
+  const raw = mod.default || mod
+
+  // SwarmClaw native format
+  if (raw.name && raw.hooks) {
+    return raw as Plugin
+  }
+
+  // OpenClaw format: { name, activate(ctx), deactivate() }
+  if (raw.name && typeof raw.activate === 'function') {
+    const oc = raw as OpenClawPlugin
+    const hooks: PluginHooks = {}
+
+    // OpenClaw's activate receives an object of hook registrars.
+    // Map OpenClaw lifecycle names to SwarmClaw hook names.
+    const registrar: Record<string, (fn: (...args: any[]) => any) => void> = {
+      onAgentStart: (fn) => { hooks.beforeAgentStart = fn },
+      onAgentComplete: (fn) => { hooks.afterAgentComplete = fn },
+      onToolCall: (fn) => { hooks.beforeToolExec = fn },
+      onToolResult: (fn) => { hooks.afterToolExec = fn },
+      onMessage: (fn) => { hooks.onMessage = fn },
+    }
+
+    try {
+      oc.activate(registrar)
+    } catch (err: any) {
+      console.error(`[plugins] OpenClaw activate() failed for ${oc.name}:`, err.message)
+      return null
+    }
+
+    return {
+      name: oc.name,
+      description: `OpenClaw plugin (v${oc.version || '0.0.0'})`,
+      hooks,
+    }
+  }
+
+  return null
+}
+
 // Ensure directories exist
 if (!fs.existsSync(PLUGINS_DIR)) fs.mkdirSync(PLUGINS_DIR, { recursive: true })
 if (!fs.existsSync(PLUGINS_CONFIG)) fs.writeFileSync(PLUGINS_CONFIG, '{}')
@@ -39,10 +92,10 @@ class PluginManager {
           // Clear require cache to allow reloads
           delete dynamicRequire.cache[fullPath]
           const mod = dynamicRequire(fullPath)
-          const plugin: Plugin = mod.default || mod
+          const plugin = normalizePlugin(mod)
 
-          if (!plugin.name || !plugin.hooks) {
-            console.warn(`[plugins] Skipping ${file}: missing name or hooks`)
+          if (!plugin) {
+            console.warn(`[plugins] Skipping ${file}: unrecognized plugin format`)
             continue
           }
 
@@ -120,6 +173,32 @@ class PluginManager {
     // Force reload on next hook call
     this.loaded = false
     this.plugins = []
+  }
+
+  async installPlugin(url: string, filename: string): Promise<{ ok: boolean; error?: string }> {
+    if (!url.startsWith('https://')) {
+      return { ok: false, error: 'URL must be HTTPS' }
+    }
+    const sanitized = path.basename(filename)
+    if (sanitized !== filename || !filename.endsWith('.js')) {
+      return { ok: false, error: 'Invalid filename' }
+    }
+
+    try {
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`Download failed: ${res.status}`)
+      const code = await res.text()
+
+      if (!fs.existsSync(PLUGINS_DIR)) {
+        fs.mkdirSync(PLUGINS_DIR, { recursive: true })
+      }
+
+      fs.writeFileSync(path.join(PLUGINS_DIR, sanitized), code, 'utf8')
+      this.reload()
+      return { ok: true }
+    } catch (err: any) {
+      return { ok: false, error: err.message }
+    }
   }
 
   private loadConfig(): Record<string, { enabled: boolean }> {

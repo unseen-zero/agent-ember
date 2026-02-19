@@ -187,7 +187,13 @@ Agents and sessions can have **fallback credentials**. If the primary API key ge
 
 ## Plugins
 
-Extend agent behavior by dropping `.js` files into `data/plugins/`. Each plugin exports:
+Extend agent behavior with JS plugins. Three ways to install:
+
+1. **Marketplace** — Browse and install approved plugins from Settings → Plugins → Marketplace
+2. **URL** — Install from any HTTPS URL via Settings → Plugins → Install from URL
+3. **Manual** — Drop `.js` files into `data/plugins/`
+
+### Plugin Format (SwarmClaw)
 
 ```js
 module.exports = {
@@ -203,7 +209,19 @@ module.exports = {
 }
 ```
 
-Enable/disable plugins from the Settings sheet. Plugin API: `GET /api/plugins`, `POST /api/plugins`.
+### OpenClaw Plugin Compatibility
+
+SwarmClaw natively supports the OpenClaw plugin format. Drop an OpenClaw plugin into `data/plugins/` and it works automatically — lifecycle hooks are mapped:
+
+| OpenClaw Hook | SwarmClaw Hook |
+|-|-|
+| `onAgentStart` | `beforeAgentStart` |
+| `onAgentComplete` | `afterAgentComplete` |
+| `onToolCall` | `beforeToolExec` |
+| `onToolResult` | `afterToolExec` |
+| `onMessage` | `onMessage` |
+
+Plugin API: `GET /api/plugins`, `POST /api/plugins`, `GET /api/plugins/marketplace`, `POST /api/plugins/install`.
 
 ## Deploy to a VPS
 
