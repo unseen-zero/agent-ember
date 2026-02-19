@@ -25,6 +25,7 @@ import { SkillSheet } from '@/components/skills/skill-sheet'
 import { ConnectorList } from '@/components/connectors/connector-list'
 import { ConnectorSheet } from '@/components/connectors/connector-sheet'
 import { NetworkBanner } from './network-banner'
+import { UpdateBanner } from './update-banner'
 import { MobileHeader } from './mobile-header'
 import { ChatArea } from '@/components/chat/chat-area'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -275,6 +276,7 @@ export function AppLayout() {
           </div>
           {activeView === 'sessions' && (
             <>
+              <UpdateBanner />
               <NetworkBanner />
               <SessionList inSidebar onSelect={() => {}} />
             </>
@@ -348,6 +350,7 @@ export function AppLayout() {
             </div>
             {activeView === 'sessions' && (
               <>
+                <UpdateBanner />
                 <NetworkBanner />
                 <SessionList inSidebar onSelect={() => setSidebarOpen(false)} />
               </>

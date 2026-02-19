@@ -144,7 +144,7 @@ export function NewSessionSheet() {
       agent?.provider || provider,
       agent?.model || model || undefined,
       agent?.credentialId || resolvedCredentialId,
-      selectedAgentId ? (agent?.apiEndpoint || null) : (provider === 'ollama' && ollamaMode === 'local' ? endpoint : null),
+      selectedAgentId ? (agent?.apiEndpoint || null) : (currentProvider?.requiresEndpoint ? endpoint : null),
       selectedAgentId ? 'human' : undefined,
       selectedAgentId,
       agentTools || undefined,
@@ -346,19 +346,24 @@ export function NewSessionSheet() {
             </div>
           )}
 
-          {/* Endpoint — only show for local Ollama */}
-          {currentProvider?.requiresEndpoint && provider === 'ollama' && ollamaMode === 'local' && (
+          {/* Endpoint — show for providers that require it (Ollama local, OpenClaw) */}
+          {currentProvider?.requiresEndpoint && (provider === 'openclaw' || (provider === 'ollama' && ollamaMode === 'local')) && (
             <div className="mb-8">
               <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">
-                Endpoint
+                {provider === 'openclaw' ? 'OpenClaw Endpoint' : 'Endpoint'}
               </label>
               <input
                 type="text"
                 value={endpoint}
                 onChange={(e) => setEndpoint(e.target.value)}
-                placeholder={provider === 'ollama' ? 'https://your-ollama-server.com' : 'http://localhost:11434'}
+                placeholder={currentProvider.defaultEndpoint || 'http://localhost:11434'}
                 className={`${inputClass} font-mono text-[14px]`}
               />
+              {provider === 'openclaw' && (
+                <p className="text-[11px] text-text-3/60 mt-2">
+                  The /v1 endpoint of your remote OpenClaw instance
+                </p>
+              )}
             </div>
           )}
           {/* Tools */}

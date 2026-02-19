@@ -342,10 +342,15 @@ export function AgentSheet() {
         </div>
       )}
 
-      {currentProvider?.requiresEndpoint && provider === 'ollama' && ollamaMode === 'local' && (
+      {currentProvider?.requiresEndpoint && (provider === 'openclaw' || (provider === 'ollama' && ollamaMode === 'local')) && (
         <div className="mb-8">
-          <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">Endpoint</label>
-          <input type="text" value={apiEndpoint || ''} onChange={(e) => setApiEndpoint(e.target.value || null)} placeholder="http://localhost:11434" className={`${inputClass} font-mono text-[14px]`} />
+          <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">
+            {provider === 'openclaw' ? 'OpenClaw Endpoint' : 'Endpoint'}
+          </label>
+          <input type="text" value={apiEndpoint || ''} onChange={(e) => setApiEndpoint(e.target.value || null)} placeholder={currentProvider.defaultEndpoint || 'http://localhost:11434'} className={`${inputClass} font-mono text-[14px]`} />
+          {provider === 'openclaw' && (
+            <p className="text-[11px] text-text-3/60 mt-2">The /v1 endpoint of your remote OpenClaw instance</p>
+          )}
         </div>
       )}
 

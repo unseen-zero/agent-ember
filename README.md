@@ -22,7 +22,8 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 
 ## Features
 
-- **Multi-Provider Chat** — Claude CLI, OpenAI, Anthropic API, Ollama, and custom OpenAI-compatible endpoints (OpenRouter, Together, Groq, etc.)
+- **Multi-Provider Chat** — Claude CLI, OpenAI, Anthropic API, Ollama, OpenClaw, and custom OpenAI-compatible endpoints (OpenRouter, Together, Groq, etc.)
+- **OpenClaw Integration** — Connect to remote [OpenClaw](https://github.com/openclaw/openclaw) instances as providers. Control a swarm of autonomous AI agents from a single dashboard
 - **Agent Builder** — Create agents with custom personalities (soul), system prompts, tools, and skills
 - **Orchestration** — Multi-agent workflows powered by LangGraph with automatic sub-agent routing
 - **Task Board** — Queue and track agent tasks with status, comments, and results
@@ -102,8 +103,22 @@ src/
 | Claude CLI | Subprocess | Spawns `claude` with `--output-format stream-json`. Requires Claude Code installed. |
 | Anthropic | API | Direct API calls. Requires API key. |
 | OpenAI | API | GPT-4o, o3, o4-mini, etc. Requires API key. |
+| OpenClaw | Remote Agent | Connects to a remote [OpenClaw](https://github.com/openclaw/openclaw) instance via its `/v1` API. |
 | Ollama | Local | Connects to `localhost:11434`. No API key needed. |
 | Custom | API | Any OpenAI-compatible endpoint. Add via Providers sidebar. |
+
+### OpenClaw
+
+[OpenClaw](https://github.com/openclaw/openclaw) is an open-source autonomous AI agent that runs on your own devices. SwarmClaw has first-class OpenClaw support — add any number of remote OpenClaw instances as providers and orchestrate them all from one place.
+
+To connect an OpenClaw instance:
+
+1. Enable the HTTP endpoint in your OpenClaw config (`gateway.http.endpoints.chatCompletions.enabled: true`)
+2. In SwarmClaw, select **OpenClaw** as the provider when creating a session or agent
+3. Enter the endpoint URL (e.g. `http://192.168.1.50:18789/v1`)
+4. Optionally add a Bearer token if your OpenClaw instance requires authentication
+
+Each agent can point to a different OpenClaw instance — this is how you manage a **swarm of OpenClaws** from a single dashboard.
 
 ## Chat Connectors
 

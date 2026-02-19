@@ -6,7 +6,7 @@ export interface Message {
   imageUrl?: string
 }
 
-export type ProviderType = 'claude-cli' | 'openai' | 'ollama' | 'anthropic'
+export type ProviderType = 'claude-cli' | 'openai' | 'ollama' | 'anthropic' | 'openclaw'
 
 export interface ProviderInfo {
   id: ProviderType

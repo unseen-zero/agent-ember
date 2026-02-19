@@ -48,6 +48,24 @@ const PROVIDERS: Record<string, BuiltinProviderConfig> = {
     requiresEndpoint: false,
     handler: { streamChat: streamAnthropicChat },
   },
+  openclaw: {
+    id: 'openclaw',
+    name: 'OpenClaw',
+    models: ['default'],
+    requiresApiKey: false,
+    optionalApiKey: true,
+    requiresEndpoint: true,
+    defaultEndpoint: 'http://localhost:18789/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'http://localhost:18789/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
   ollama: {
     id: 'ollama',
     name: 'Ollama',
