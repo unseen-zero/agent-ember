@@ -42,9 +42,15 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
   const tools: string[] = session.tools || []
   let mcpConfigPath: string | null = null
   if (tools.includes('browser')) {
+    const proxyScript = path.join(process.cwd(), 'src/lib/server/playwright-proxy.mjs')
+    const uploadDir = path.join(os.tmpdir(), 'swarmclaw-uploads')
     const mcpConfig = JSON.stringify({
       mcpServers: {
-        playwright: { command: 'npx', args: ['@playwright/mcp@latest'] }
+        playwright: {
+          command: 'node',
+          args: [proxyScript],
+          env: { SWARMCLAW_UPLOAD_DIR: uploadDir },
+        }
       }
     })
     mcpConfigPath = path.join(os.tmpdir(), `swarmclaw-mcp-${session.id}.json`)

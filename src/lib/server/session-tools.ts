@@ -13,6 +13,7 @@ import {
   loadSkills, saveSkills,
   loadConnectors, saveConnectors,
   loadSessions,
+  UPLOAD_DIR,
 } from './storage'
 
 const MAX_OUTPUT = 50 * 1024 // 50KB
@@ -409,7 +410,18 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
           resolve: (result: any) => {
             const content = result?.content
             if (Array.isArray(content)) {
-              resolve(content.map((c: any) => c.text || c.data || '').join('\n'))
+              const parts: string[] = []
+              for (const c of content) {
+                if (c.type === 'image' && c.data) {
+                  const filename = `screenshot-${Date.now()}.png`
+                  const filepath = path.join(UPLOAD_DIR, filename)
+                  fs.writeFileSync(filepath, Buffer.from(c.data, 'base64'))
+                  parts.push(`![Screenshot](/api/uploads/${filename})`)
+                } else {
+                  parts.push(c.text || '')
+                }
+              }
+              resolve(parts.join('\n'))
             } else {
               resolve(JSON.stringify(result))
             }
