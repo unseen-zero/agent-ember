@@ -3,11 +3,15 @@ import crypto from 'crypto'
 import os from 'os'
 import path from 'path'
 import { loadSessions, saveSessions, active } from '@/lib/server/storage'
+import { getSessionRunState } from '@/lib/server/session-run-manager'
 
 export async function GET() {
   const sessions = loadSessions()
   for (const id of Object.keys(sessions)) {
-    sessions[id].active = active.has(id)
+    const run = getSessionRunState(id)
+    sessions[id].active = active.has(id) || !!run.runningRunId
+    sessions[id].queuedCount = run.queueLength
+    sessions[id].currentRunId = run.runningRunId || null
   }
   return NextResponse.json(sessions)
 }
@@ -55,6 +59,8 @@ export async function POST(req: Request) {
     agentId: body.agentId || null,
     parentSessionId: body.parentSessionId || null,
     tools: body.tools || [],
+    heartbeatEnabled: body.heartbeatEnabled ?? null,
+    heartbeatIntervalSec: body.heartbeatIntervalSec ?? null,
   }
   saveSessions(sessions)
   return NextResponse.json(sessions[id])

@@ -18,6 +18,7 @@ export function SessionList({ inSidebar, onSelect }: Props) {
   const currentUser = useAppStore((s) => s.currentUser)
   const currentSessionId = useAppStore((s) => s.currentSessionId)
   const setCurrentSession = useAppStore((s) => s.setCurrentSession)
+  const loadSessions = useAppStore((s) => s.loadSessions)
   const setNewSessionOpen = useAppStore((s) => s.setNewSessionOpen)
   const clearSessions = useAppStore((s) => s.clearSessions)
   const setMessages = useChatStore((s) => s.setMessages)
@@ -46,12 +47,16 @@ export function SessionList({ inSidebar, onSelect }: Props) {
 
   const handleSelect = async (id: string) => {
     setCurrentSession(id)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('swarmclaw:scroll-bottom'))
+    }
     try {
       const msgs = await fetchMessages(id)
       setMessages(msgs)
     } catch {
       setMessages(sessions[id]?.messages || [])
     }
+    await loadSessions()
     onSelect?.()
   }
 

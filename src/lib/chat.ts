@@ -3,6 +3,7 @@ import { getStoredAccessKey } from './api-client'
 
 interface StreamChatOptions {
   internal?: boolean
+  queueMode?: 'followup' | 'steer' | 'collect'
 }
 
 export async function streamChat(
@@ -20,14 +21,14 @@ export async function streamChat(
       'Content-Type': 'application/json',
       ...(key ? { 'X-Access-Key': key } : {}),
     },
-    body: JSON.stringify({ message, imagePath, imageUrl, internal: !!options?.internal }),
+    body: JSON.stringify({
+      message,
+      imagePath,
+      imageUrl,
+      internal: !!options?.internal,
+      queueMode: options?.queueMode,
+    }),
   })
-
-  if (res.status === 409) {
-    onEvent?.({ t: 'err', text: 'Session is busy. Please wait.' })
-    onEvent?.({ t: 'done' })
-    return
-  }
 
   if (!res.ok || !res.body) {
     onEvent?.({ t: 'err', text: `Request failed (${res.status})` })

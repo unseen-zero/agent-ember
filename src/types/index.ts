@@ -12,6 +12,7 @@ export interface Message {
   imagePath?: string
   imageUrl?: string
   toolEvents?: MessageToolEvent[]
+  kind?: 'chat' | 'heartbeat' | 'system'
 }
 
 export type ProviderType = 'claude-cli' | 'codex-cli' | 'opencode-cli' | 'openai' | 'ollama' | 'anthropic' | 'openclaw' | 'google' | 'deepseek' | 'groq' | 'together' | 'mistral' | 'xai' | 'fireworks'
@@ -55,12 +56,16 @@ export interface Session {
   agentId?: string | null
   parentSessionId?: string | null
   tools?: string[]
+  heartbeatEnabled?: boolean | null
+  heartbeatIntervalSec?: number | null
   file?: string | null
+  queuedCount?: number
+  currentRunId?: string | null
 }
 
 export type Sessions = Record<string, Session>
 
-export type SessionTool = 'shell' | 'files' | 'claude_code' | 'web_search' | 'web_fetch' | 'edit_file'
+export type SessionTool = 'shell' | 'files' | 'claude_code' | 'web_search' | 'web_fetch' | 'edit_file' | 'process'
 
 // --- Cost Tracking ---
 
@@ -169,6 +174,9 @@ export interface Agent {
   skills?: string[]             // e.g. ['frontend-design'] — Claude Code skills to use
   skillIds?: string[]           // IDs of uploaded skills from the Skills manager
   platformAssignScope?: 'self' | 'all'  // defaults to 'self'
+  heartbeatEnabled?: boolean
+  heartbeatIntervalSec?: number | null
+  heartbeatPrompt?: string | null
   createdAt: number
   updatedAt: number
 }
@@ -244,6 +252,9 @@ export interface AppSettings {
   speechRecognitionLang?: string | null
   heartbeatPrompt?: string | null
   heartbeatIntervalSec?: number | null
+  heartbeatActiveStart?: string | null
+  heartbeatActiveEnd?: string | null
+  heartbeatTimezone?: string | null
 }
 
 // --- Orchestrator Secrets ---

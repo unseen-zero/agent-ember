@@ -1,7 +1,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { spawn } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import type { StreamChatOptions } from './index'
 import { log } from '../server/logger'
 import { loadRuntimeSettings } from '../server/runtime-settings'
@@ -44,7 +44,7 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
     args.push('resume', session.codexThreadId)
   }
 
-  args.push('--json', '--full-auto')
+  args.push('--json', '--full-auto', '--skip-git-repo-check')
 
   if (session.model) args.push('-m', session.model)
 
@@ -66,6 +66,9 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
   args.push('-')
 
   const env = { ...process.env, TERM: 'dumb', NO_COLOR: '1' } as NodeJS.ProcessEnv
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith('CODEX')) delete (env as Record<string, unknown>)[key]
+  }
 
   // Pass API key if available
   if (session.apiKey) {
@@ -75,6 +78,26 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
   // Point to temp CODEX_HOME for system prompt injection
   if (tempCodexHome) {
     env.CODEX_HOME = tempCodexHome
+  }
+
+  if (!session.apiKey) {
+    const loginProbe = spawnSync(CODEX, ['login', 'status'], {
+      cwd: session.cwd,
+      env,
+      encoding: 'utf-8',
+      timeout: 8000,
+    })
+    const probeText = `${loginProbe.stdout || ''}\n${loginProbe.stderr || ''}`.toLowerCase()
+    const loggedIn = probeText.includes('logged in')
+    if ((loginProbe.status ?? 1) !== 0 || !loggedIn) {
+      const msg = 'Codex CLI is not authenticated. Run `codex login` (or set an API key in provider settings) and try again.'
+      log.error('codex-cli', msg)
+      write(`data: ${JSON.stringify({ t: 'err', text: msg })}\n\n`)
+      if (tempCodexHome) {
+        try { fs.rmSync(tempCodexHome, { recursive: true }) } catch { /* ignore */ }
+      }
+      return Promise.resolve('')
+    }
   }
 
   log.info('codex-cli', `Spawning: ${CODEX}`, {
@@ -101,6 +124,7 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
   let fullResponse = ''
   let buf = ''
   let eventCount = 0
+  let stderrText = ''
 
   proc.stdout!.on('data', (chunk: Buffer) => {
     const raw = chunk.toString()
@@ -163,6 +187,16 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
           log.info('codex-cli', `Turn completed`, ev.usage)
         }
 
+        else if (ev.type === 'error' && ev.message) {
+          write(`data: ${JSON.stringify({ t: 'err', text: String(ev.message) })}\n\n`)
+          log.warn('codex-cli', `Event error: ${String(ev.message).slice(0, 300)}`)
+        }
+
+        else if (ev.type === 'turn.failed' && ev.error?.message) {
+          write(`data: ${JSON.stringify({ t: 'err', text: String(ev.error.message) })}\n\n`)
+          log.warn('codex-cli', `Turn failed: ${String(ev.error.message).slice(0, 300)}`)
+        }
+
         // Log other event types for debugging
         else if (eventCount <= 10) {
           log.debug('codex-cli', `Event: ${ev.type}`)
@@ -180,6 +214,8 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
 
   proc.stderr!.on('data', (chunk: Buffer) => {
     const text = chunk.toString()
+    stderrText += text
+    if (stderrText.length > 16_000) stderrText = stderrText.slice(-16_000)
     log.warn('codex-cli', `stderr [${session.id}]`, text.slice(0, 500))
     console.error(`[${session.id}] codex stderr:`, text.slice(0, 200))
   })
@@ -191,6 +227,12 @@ export function streamCodexCliChat({ session, message, imagePath, systemPrompt, 
       // Clean up temp CODEX_HOME
       if (tempCodexHome) {
         try { fs.rmSync(tempCodexHome, { recursive: true }) } catch { /* ignore */ }
+      }
+      if ((code ?? 0) !== 0 && !fullResponse.trim()) {
+        const msg = stderrText.trim()
+          ? `Codex CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}: ${stderrText.trim().slice(0, 1200)}`
+          : `Codex CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''} and returned no output.`
+        write(`data: ${JSON.stringify({ t: 'err', text: msg })}\n\n`)
       }
       resolve(fullResponse)
     })

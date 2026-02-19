@@ -7,6 +7,7 @@ import { useChatStore } from '@/stores/use-chat-store'
 import { IconButton } from '@/components/shared/icon-button'
 import { UsageBadge } from '@/components/shared/usage-badge'
 import { ChatToolToggles } from './chat-tool-toggles'
+import { api } from '@/lib/api-client'
 
 function shortPath(p: string): string {
   return (p || '').replace(/^\/Users\/\w+/, '~')
@@ -41,10 +42,13 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
   const setActiveView = useAppStore((s) => s.setActiveView)
   const setMemoryAgentFilter = useAppStore((s) => s.setMemoryAgentFilter)
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen)
+  const appSettings = useAppStore((s) => s.appSettings)
+  const loadSessions = useAppStore((s) => s.loadSessions)
   const providerLabel = PROVIDER_LABELS[session.provider] || session.provider
   const agent = session.agentId ? agents[session.agentId] : null
   const modelName = session.model || agent?.model || ''
   const [copied, setCopied] = useState(false)
+  const [heartbeatSaving, setHeartbeatSaving] = useState(false)
 
   // Find linked task for this session
   const linkedTask = useMemo(() => {
@@ -62,8 +66,40 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const heartbeatEnabled = session.heartbeatEnabled !== false
+  const heartbeatSupported = (session.tools?.length ?? 0) > 0
+  const loopIsOngoing = appSettings.loopMode === 'ongoing'
+  const heartbeatIntervalRaw = session.heartbeatIntervalSec ?? appSettings.heartbeatIntervalSec ?? 120
+  const heartbeatIntervalSec = Number.isFinite(Number(heartbeatIntervalRaw)) ? Math.max(0, Math.trunc(Number(heartbeatIntervalRaw))) : 120
+
+  const handleToggleHeartbeat = async () => {
+    if (!heartbeatSupported || heartbeatSaving) return
+    setHeartbeatSaving(true)
+    try {
+      await api('PUT', `/sessions/${session.id}`, { heartbeatEnabled: !heartbeatEnabled })
+      await loadSessions()
+    } finally {
+      setHeartbeatSaving(false)
+    }
+  }
+
+  const handleCycleHeartbeatInterval = async () => {
+    if (!heartbeatSupported || heartbeatSaving) return
+    const presets = [30, 60, 120, 300, 600]
+    const current = heartbeatIntervalSec
+    const idx = presets.indexOf(current)
+    const next = idx === -1 ? 120 : presets[(idx + 1) % presets.length]
+    setHeartbeatSaving(true)
+    try {
+      await api('PUT', `/sessions/${session.id}`, { heartbeatIntervalSec: next, heartbeatEnabled: true })
+      await loadSessions()
+    } finally {
+      setHeartbeatSaving(false)
+    }
+  }
+
   return (
-    <header className="flex flex-col border-b border-white/[0.04] bg-bg/80 backdrop-blur-md shrink-0"
+    <header className="relative z-20 flex flex-col border-b border-white/[0.04] bg-bg/80 backdrop-blur-md shrink-0"
       style={mobile ? { paddingTop: 'max(12px, env(safe-area-inset-top))' } : undefined}>
       <div className="flex items-center gap-3 px-5 py-3 min-h-[56px]">
         {onBack && (
@@ -145,8 +181,37 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
       {/* Sub-bar: tools toggle + agent memories + task link + CLI session ID + browser */}
       {(agent || linkedTask || cliSessionId || browserActive || session.tools?.length) && (
         <div className="flex items-center gap-3 px-5 pb-2.5 -mt-1">
-          {!isCliSession && (agent?.tools?.length ?? 0) > 0 && (
+          {(((agent?.tools?.length ?? 0) > 0) || ((session.tools?.length ?? 0) > 0)) && (
             <ChatToolToggles session={session} />
+          )}
+          {heartbeatSupported && (
+            <>
+              <button
+                onClick={handleToggleHeartbeat}
+                disabled={heartbeatSaving}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] transition-colors cursor-pointer border-none
+                  ${heartbeatEnabled ? 'bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-400' : 'bg-white/[0.04] hover:bg-white/[0.07] text-text-3'}`}
+                title={loopIsOngoing ? 'Toggle heartbeat for this session' : 'Global loop mode is bounded; heartbeats are paused'}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${heartbeatEnabled ? 'bg-emerald-400' : 'bg-text-3/40'}`} />
+                <span className="text-[11px] font-600">
+                  HB {heartbeatEnabled ? 'On' : 'Off'}
+                </span>
+                {!loopIsOngoing && (
+                  <span className="text-[10px] text-text-3/50">(bounded)</span>
+                )}
+              </button>
+              {session.name === '__main__' && (
+                <button
+                  onClick={handleCycleHeartbeatInterval}
+                  disabled={heartbeatSaving}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-white/[0.04] hover:bg-white/[0.07] text-text-3 transition-colors cursor-pointer border-none"
+                  title="Cycle heartbeat interval for this chat"
+                >
+                  <span className="text-[11px] font-600">HB {heartbeatIntervalSec}s</span>
+                </button>
+              )}
+            </>
           )}
           {agent && session.tools?.includes('memory') && (
             <button

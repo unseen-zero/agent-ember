@@ -188,13 +188,14 @@ You have access to platform management tools. Here's how to use them:
 - **manage_schedules**: Create recurring or one-time scheduled jobs. Set "scheduleType" to "cron", "interval", or "once". Provide "taskPrompt" for what the agent should do and "agentId" for who runs it.
 - **manage_skills**: List, create, or update reusable skill definitions that can be attached to agents.
 - **manage_connectors**: Manage chat platform bridges (Discord, Slack, Telegram, WhatsApp).
-- **manage_sessions**: List and view chat sessions (read-only).
+- **manage_sessions**: Session-level operations. Use \`sessions_tool\` to list sessions, send inter-session messages, spawn new agent sessions, and inspect status/history.
+- **manage_secrets**: Store and retrieve encrypted service tokens/API credentials for durable reuse.
 - **memory_tool**: Store and retrieve long-term memories. Use "store" to save knowledge, "search" to find relevant memories.
 
 Be concise and helpful. When users ask how to do something, guide them to the specific UI location and explain the steps.`,
       soul: '',
       isOrchestrator: false,
-      tools: ['memory', 'manage_agents', 'manage_tasks', 'manage_schedules', 'manage_skills', 'manage_connectors', 'manage_sessions'],
+      tools: ['memory', 'manage_agents', 'manage_tasks', 'manage_schedules', 'manage_skills', 'manage_connectors', 'manage_sessions', 'manage_secrets'],
       platformAssignScope: 'all',
       skillIds: [],
       subAgentIds: [],

@@ -12,6 +12,7 @@ const AVAILABLE_TOOLS: { id: string; label: string; description: string }[] = [
   { id: 'shell', label: 'Shell', description: 'Execute commands in the working directory' },
   { id: 'files', label: 'Files', description: 'Read, write, and list files' },
   { id: 'edit_file', label: 'Edit File', description: 'Search-and-replace editing within files' },
+  { id: 'process', label: 'Process', description: 'Monitor and control long-running shell commands' },
   { id: 'web_search', label: 'Web Search', description: 'Search the web via DuckDuckGo' },
   { id: 'web_fetch', label: 'Web Fetch', description: 'Fetch and extract text from URLs' },
   { id: 'claude_code', label: 'Claude Code', description: 'Delegate complex tasks to Claude Code CLI' },
@@ -25,8 +26,11 @@ const PLATFORM_TOOLS: { id: string; label: string; description: string }[] = [
   { id: 'manage_schedules', label: 'Schedules', description: 'Create, edit, and delete schedules' },
   { id: 'manage_skills', label: 'Skills', description: 'Create, edit, and delete skills' },
   { id: 'manage_connectors', label: 'Connectors', description: 'Create, edit, and delete connectors' },
-  { id: 'manage_sessions', label: 'Sessions', description: 'List and view sessions (read-only)' },
+  { id: 'manage_sessions', label: 'Sessions', description: 'List sessions, send messages, and spawn session work' },
+  { id: 'manage_secrets', label: 'Secrets', description: 'Store and retrieve encrypted service secrets' },
 ]
+
+const NATIVE_CAPABILITY_PROVIDER_IDS = new Set<ProviderType>(['claude-cli', 'codex-cli', 'opencode-cli', 'openclaw'])
 
 export function AgentSheet() {
   const open = useAppStore((s) => s.agentSheetOpen)
@@ -97,6 +101,7 @@ export function AgentSheet() {
   const currentProvider = providers.find((p) => p.id === provider)
   const providerCredentials = Object.values(credentials).filter((c) => c.provider === provider)
   const editing = editingId ? agents[editingId] : null
+  const hasNativeCapabilities = NATIVE_CAPABILITY_PROVIDER_IDS.has(provider)
 
   useEffect(() => {
     if (open) {
@@ -475,15 +480,13 @@ export function AgentSheet() {
         </div>
       )}
 
-      {/* Tools — hidden for CLI providers that handle tools natively (except Claude CLI which exposes browser toggle) */}
-      {provider !== 'codex-cli' && provider !== 'opencode-cli' && (
+      {/* Tools — hidden for providers that manage capabilities outside LangGraph */}
+      {!hasNativeCapabilities && (
         <div className="mb-8">
           <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Tools</label>
-          <p className="text-[12px] text-text-3/60 mb-3">
-            {provider === 'claude-cli' ? 'Claude Code has built-in tools. Toggle browser for web browsing.' : 'Enable tools for LangGraph agent sessions.'}
-          </p>
+          <p className="text-[12px] text-text-3/60 mb-3">Enable tools for LangGraph agent sessions.</p>
           <div className="space-y-3">
-            {AVAILABLE_TOOLS.filter((t) => provider === 'claude-cli' ? t.id === 'browser' : true).map((t) => (
+            {AVAILABLE_TOOLS.map((t) => (
               <label key={t.id} className="flex items-center gap-3 cursor-pointer">
                 <div
                   onClick={() => setTools((prev) => prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id])}
@@ -501,8 +504,8 @@ export function AgentSheet() {
         </div>
       )}
 
-      {/* Platform — hidden for CLI providers that can't use LangGraph tools */}
-      {provider !== 'codex-cli' && provider !== 'opencode-cli' && (
+      {/* Platform — hidden for providers that manage capabilities outside LangGraph */}
+      {!hasNativeCapabilities && (
         <div className="mb-8">
           <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Platform</label>
           <p className="text-[12px] text-text-3/60 mb-3">Allow this agent to manage platform resources directly.</p>
@@ -541,11 +544,17 @@ export function AgentSheet() {
         </div>
       )}
 
-      {/* CLI provider note */}
-      {(provider === 'codex-cli' || provider === 'opencode-cli') && (
+      {/* Native capability provider note */}
+      {hasNativeCapabilities && (
         <div className="mb-8 p-4 rounded-[14px] bg-white/[0.02] border border-white/[0.06]">
           <p className="text-[13px] text-text-3">
-            {provider === 'codex-cli' ? 'OpenAI Codex CLI' : 'OpenCode CLI'} uses its own built-in tools (shell, files, etc.) — no additional tool configuration needed.
+            {provider === 'openclaw'
+              ? 'OpenClaw manages tools/platform capabilities in the remote OpenClaw instance — no local tool toggles are applied here.'
+              : provider === 'claude-cli'
+                ? 'Claude CLI uses its own built-in capabilities — no additional local tool/platform configuration is needed.'
+                : provider === 'codex-cli'
+                  ? 'OpenAI Codex CLI uses its own built-in tools (shell, files, etc.) — no additional local tool configuration needed.'
+                  : 'OpenCode CLI uses its own built-in tools (shell, files, etc.) — no additional local tool configuration needed.'}
           </p>
         </div>
       )}

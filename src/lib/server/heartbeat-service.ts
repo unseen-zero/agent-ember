@@ -1,0 +1,195 @@
+import { loadAgents, loadSessions, loadSettings } from './storage'
+import { enqueueSessionRun, getSessionRunState } from './session-run-manager'
+import { log } from './logger'
+
+const HEARTBEAT_TICK_MS = 5_000
+
+interface HeartbeatState {
+  timer: ReturnType<typeof setInterval> | null
+  running: boolean
+  lastBySession: Map<string, number>
+}
+
+const globalKey = '__swarmclaw_heartbeat_service__' as const
+const state: HeartbeatState = (globalThis as any)[globalKey] ?? ((globalThis as any)[globalKey] = {
+  timer: null,
+  running: false,
+  lastBySession: new Map<string, number>(),
+})
+
+function parseIntBounded(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number.parseInt(value, 10)
+      : Number.NaN
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.max(min, Math.min(max, Math.trunc(parsed)))
+}
+
+function parseTimeHHMM(raw: unknown): { h: number; m: number } | null {
+  if (typeof raw !== 'string') return null
+  const val = raw.trim()
+  if (!val) return null
+  const m = val.match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return null
+  const h = Number.parseInt(m[1], 10)
+  const mm = Number.parseInt(m[2], 10)
+  if (!Number.isFinite(h) || !Number.isFinite(mm)) return null
+  if (h < 0 || h > 24 || mm < 0 || mm > 59) return null
+  if (h === 24 && mm !== 0) return null
+  return { h, m: mm }
+}
+
+function getMinutesInTimezone(date: Date, timezone?: string | null): number | null {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: timezone || undefined,
+    })
+    const parts = formatter.formatToParts(date)
+    const hh = Number.parseInt(parts.find((p) => p.type === 'hour')?.value || '', 10)
+    const mm = Number.parseInt(parts.find((p) => p.type === 'minute')?.value || '', 10)
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null
+    return hh * 60 + mm
+  } catch {
+    return null
+  }
+}
+
+function inActiveWindow(nowDate: Date, startRaw: unknown, endRaw: unknown, tzRaw: unknown): boolean {
+  const start = parseTimeHHMM(startRaw)
+  const end = parseTimeHHMM(endRaw)
+  if (!start || !end) return true
+
+  const tz = typeof tzRaw === 'string' && tzRaw.trim() ? tzRaw.trim() : undefined
+  const current = getMinutesInTimezone(nowDate, tz)
+  if (current == null) return true
+
+  const startM = start.h * 60 + start.m
+  const endM = end.h * 60 + end.m
+  if (startM === endM) return true
+  if (startM < endM) return current >= startM && current < endM
+  return current >= startM || current < endM
+}
+
+function heartbeatConfigForSession(session: any, settings: Record<string, any>, agents: Record<string, any>): {
+  intervalSec: number
+  prompt: string
+  enabled: boolean
+} {
+  const globalIntervalSec = parseIntBounded(settings.heartbeatIntervalSec, 120, 0, 3600)
+  const globalPrompt = (typeof settings.heartbeatPrompt === 'string' && settings.heartbeatPrompt.trim())
+    ? settings.heartbeatPrompt.trim()
+    : 'SWARM_HEARTBEAT_CHECK'
+
+  let enabled = globalIntervalSec > 0
+  let intervalSec = globalIntervalSec
+  let prompt = globalPrompt
+
+  if (session.agentId) {
+    const agent = agents[session.agentId]
+    if (agent) {
+      if (agent.heartbeatEnabled === false) enabled = false
+      if (agent.heartbeatEnabled === true) enabled = true
+      if (agent.heartbeatIntervalSec !== undefined && agent.heartbeatIntervalSec !== null) {
+        intervalSec = parseIntBounded(agent.heartbeatIntervalSec, intervalSec, 0, 3600)
+      }
+      if (typeof agent.heartbeatPrompt === 'string' && agent.heartbeatPrompt.trim()) {
+        prompt = agent.heartbeatPrompt.trim()
+      }
+    }
+  }
+
+  if (session.heartbeatEnabled === false) enabled = false
+  if (session.heartbeatEnabled === true) enabled = true
+  if (session.heartbeatIntervalSec !== undefined && session.heartbeatIntervalSec !== null) {
+    intervalSec = parseIntBounded(session.heartbeatIntervalSec, intervalSec, 0, 3600)
+  }
+  if (typeof session.heartbeatPrompt === 'string' && session.heartbeatPrompt.trim()) {
+    prompt = session.heartbeatPrompt.trim()
+  }
+
+  return { enabled: enabled && intervalSec > 0, intervalSec, prompt }
+}
+
+function shouldRunHeartbeats(settings: Record<string, any>): boolean {
+  const loopMode = settings.loopMode === 'ongoing' ? 'ongoing' : 'bounded'
+  return loopMode === 'ongoing'
+}
+
+async function tickHeartbeats() {
+  const settings = loadSettings()
+  if (!shouldRunHeartbeats(settings)) return
+
+  const now = Date.now()
+  const nowDate = new Date(now)
+  if (!inActiveWindow(nowDate, settings.heartbeatActiveStart, settings.heartbeatActiveEnd, settings.heartbeatTimezone)) {
+    return
+  }
+
+  const sessions = loadSessions()
+  const agents = loadAgents()
+  const hasScopedAgents = Object.values(agents).some((a: any) => a?.heartbeatEnabled === true)
+
+  for (const session of Object.values(sessions) as any[]) {
+    if (!session?.id) continue
+    if (!Array.isArray(session.tools) || session.tools.length === 0) continue
+    if (session.sessionType && session.sessionType !== 'human' && session.sessionType !== 'orchestrated') continue
+    if (hasScopedAgents) {
+      const agent = session.agentId ? agents[session.agentId] : null
+      const sessionForcedOn = session.heartbeatEnabled === true
+      if (!sessionForcedOn && (!agent || agent.heartbeatEnabled !== true)) continue
+    }
+
+    const cfg = heartbeatConfigForSession(session, settings, agents)
+    if (!cfg.enabled) continue
+
+    const last = state.lastBySession.get(session.id) || 0
+    if (now - last < cfg.intervalSec * 1000) continue
+
+    const runState = getSessionRunState(session.id)
+    if (runState.runningRunId) continue
+
+    state.lastBySession.set(session.id, now)
+    const enqueue = enqueueSessionRun({
+      sessionId: session.id,
+      message: cfg.prompt,
+      internal: true,
+      source: 'heartbeat',
+      mode: 'collect',
+      dedupeKey: `heartbeat:${session.id}`,
+    })
+
+    enqueue.promise.catch((err) => {
+      log.warn('heartbeat', `Heartbeat run failed for session ${session.id}`, err?.message || String(err))
+    })
+  }
+}
+
+export function startHeartbeatService() {
+  if (state.running) return
+  state.running = true
+  state.timer = setInterval(() => {
+    tickHeartbeats().catch((err) => {
+      log.error('heartbeat', 'Heartbeat tick failed', err?.message || String(err))
+    })
+  }, HEARTBEAT_TICK_MS)
+}
+
+export function stopHeartbeatService() {
+  state.running = false
+  if (state.timer) {
+    clearInterval(state.timer)
+    state.timer = null
+  }
+}
+
+export function getHeartbeatServiceStatus() {
+  return {
+    running: state.running,
+    trackedSessions: state.lastBySession.size,
+  }
+}

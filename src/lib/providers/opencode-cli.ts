@@ -86,6 +86,7 @@ export function streamOpenCodeCliChat({ session, message, imagePath, systemPromp
   active.set(session.id, proc)
 
   let fullResponse = ''
+  let stderrText = ''
 
   proc.stdout!.on('data', (chunk: Buffer) => {
     const text = chunk.toString()
@@ -96,6 +97,8 @@ export function streamOpenCodeCliChat({ session, message, imagePath, systemPromp
 
   proc.stderr!.on('data', (chunk: Buffer) => {
     const text = chunk.toString()
+    stderrText += text
+    if (stderrText.length > 16_000) stderrText = stderrText.slice(-16_000)
     log.warn('opencode-cli', `stderr [${session.id}]`, text.slice(0, 500))
   })
 
@@ -105,6 +108,12 @@ export function streamOpenCodeCliChat({ session, message, imagePath, systemPromp
       active.delete(session.id)
       // Clean up temp dir
       if (tmpDir) try { fs.rmSync(tmpDir, { recursive: true }) } catch { /* ignore */ }
+      if ((code ?? 0) !== 0 && !fullResponse.trim()) {
+        const msg = stderrText.trim()
+          ? `OpenCode CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}: ${stderrText.trim().slice(0, 1200)}`
+          : `OpenCode CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''} and returned no output.`
+        write(`data: ${JSON.stringify({ t: 'err', text: msg })}\n\n`)
+      }
       resolve(fullResponse)
     })
 

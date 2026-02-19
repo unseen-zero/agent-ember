@@ -23,14 +23,15 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 - **15 Built-in Providers** — Claude Code CLI, OpenAI Codex CLI, OpenCode CLI, Anthropic, OpenAI, Google Gemini, DeepSeek, Groq, Together AI, Mistral AI, xAI (Grok), Fireworks AI, Ollama, OpenClaw, plus custom OpenAI-compatible endpoints
 - **OpenClaw Integration** — Connect to remote [OpenClaw](https://github.com/openclaw/openclaw) instances as providers. Control a swarm of autonomous AI agents from a single dashboard
 - **Agent Builder** — Create agents with custom personalities (soul), system prompts, tools, and skills. AI-powered generation from a description
-- **Agent Tools** — Shell, files, edit file, send file, web search, web fetch, Claude Code delegation, Playwright browser automation, and persistent memory
-- **Platform Tools** — Agents can manage other agents, tasks, schedules, skills, connectors, and sessions via built-in platform tools
+- **Agent Tools** — Shell, process control for long-running commands, files, edit file, send file, web search, web fetch, Claude Code delegation, Playwright browser automation, and persistent memory
+- **Platform Tools** — Agents can manage other agents, tasks, schedules, skills, connectors, sessions, and encrypted secrets via built-in platform tools
 - **Orchestration** — Multi-agent workflows powered by LangGraph with automatic sub-agent routing
 - **Agentic Execution Policy** — Tool-first autonomous action loop with progress updates, evidence-driven answers, and better use of platform tools for long-lived work
 - **Task Board** — Queue and track agent tasks with status, comments, and results
 - **Background Daemon** — Auto-processes queued tasks and scheduled jobs with a 30s heartbeat
 - **Scheduling** — Cron-based agent scheduling with human-friendly presets
 - **Loop Runtime Controls** — Switch between bounded and ongoing loops with configurable step caps, runtime guards, heartbeat cadence, and timeout budgets
+- **Session Run Queue** — Per-session queued runs with followup/steer/collect modes and run-state APIs
 - **Voice Settings** — Per-instance ElevenLabs API key + voice ID for TTS replies, plus configurable speech recognition language for chat input
 - **Chat Connectors** — Bridge agents to Discord, Slack, Telegram, and WhatsApp
 - **Skills System** — Discover local skills, import skills from URL, and load OpenClaw `SKILL.md` files (frontmatter-compatible)
@@ -117,8 +118,8 @@ src/
 
 | Provider | Binary | Notes |
 |-|-|-|
-| Claude Code CLI | `claude` | Spawns with `--output-format stream-json`. Full tool use via CLI. |
-| OpenAI Codex CLI | `codex` | Spawns with `--full-auto`. Requires Codex CLI installed. |
+| Claude Code CLI | `claude` | Spawns with `--print --output-format stream-json`. Includes auth preflight and clearer timeout/exit diagnostics. |
+| OpenAI Codex CLI | `codex` | Spawns with `--full-auto --skip-git-repo-check`. Includes login preflight and streamed CLI error events. |
 | OpenCode CLI | `opencode` | Spawns with `-p` flag. Multi-model support. |
 
 ### API Providers
@@ -149,7 +150,11 @@ src/
 
 To connect an OpenClaw instance:
 
-1. Enable the HTTP endpoint in your OpenClaw config (`gateway.http.endpoints.chatCompletions.enabled: true`)
+1. Enable the HTTP endpoint on OpenClaw:
+   ```bash
+   openclaw config set gateway.http.endpoints.chatCompletions.enabled true
+   launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
+   ```
 2. In SwarmClaw, select **OpenClaw** as the provider when creating a session or agent
 3. Enter the endpoint URL (e.g. `http://192.168.1.50:18789/v1`)
 4. Optionally add a Bearer token if your OpenClaw instance requires authentication
@@ -174,6 +179,7 @@ Agents can use the following tools when enabled:
 | Tool | Description |
 |-|-|
 | Shell | Execute commands in the session working directory |
+| Process | Control long-running shell commands (`process_tool`) |
 | Files | Read, write, list, and send files |
 | Edit File | Search-and-replace editing (exact match required) |
 | Web Search | Search the web via DuckDuckGo HTML scraping |
@@ -193,9 +199,18 @@ Agents with platform tools enabled can manage the SwarmClaw instance:
 | Manage Schedules | Create cron, interval, or one-time scheduled jobs |
 | Manage Skills | List, create, update reusable skill definitions |
 | Manage Connectors | Manage chat platform bridges |
-| Manage Sessions | List and view chat sessions (read-only) |
+| Manage Sessions | Enable `sessions_tool` for list/history/status/send/spawn/stop |
+| Manage Secrets | Store and retrieve encrypted reusable secrets |
 
 Enable tools per-session or per-agent in the UI. CLI providers (Claude Code, Codex, OpenCode) handle tools natively through their own CLI.
+OpenClaw provider capabilities are also managed remotely in OpenClaw itself, so local Tools/Platform toggles are hidden for OpenClaw agents.
+
+## Starter Skills (URL Import)
+
+Import these directly in **Skills → Import via URL**:
+
+- `https://swarmclaw.ai/skills/openclaw-swarmclaw-bridge/SKILL.md`
+- `https://swarmclaw.ai/skills/swarmclaw-bootstrap/SKILL.md`
 
 ## Cost Tracking
 
@@ -221,6 +236,17 @@ Configure loop behavior in **Settings → Runtime & Loop Controls**:
 
 You can also tune shell timeout, Claude Code delegation timeout, and CLI provider process timeout from the same settings panel.
 
+## CLI Troubleshooting
+
+- **Claude delegate returns no output or fails quickly:** verify Claude auth on the host with:
+  - `claude auth status`
+  - If not logged in: `claude auth login` (or `claude setup-token`)
+- **Claude delegate times out:** increase **Claude Code Timeout (sec)** in Settings.
+- **Codex fails outside a git repo:** SwarmClaw now uses `--skip-git-repo-check`, but if login is missing run:
+  - `codex login`
+  - `codex login status`
+- **CLI provider errors are now surfaced in chat:** non-zero exits and streamed error events are emitted as chat errors instead of failing silently.
+
 ## Voice & Heartbeat
 
 Configure these in **Settings**:
@@ -228,7 +254,7 @@ Configure these in **Settings**:
 - **Voice** — set `ElevenLabs API Key`, `ElevenLabs Voice ID`, and `Speech Recognition Language`
 - **Heartbeat** — set `Heartbeat Interval (Seconds)` and `Heartbeat Prompt` for ongoing session pings
 
-Heartbeat pings are internal checks for ongoing sessions. If there's no new status, the assistant returns `HEARTBEAT_OK`; otherwise it returns a concise progress update and next step.
+Heartbeat pings are internal checks for ongoing sessions. If there's no new status, the assistant returns `HEARTBEAT_OK`; otherwise it returns a concise progress update and next step. In chat UI, heartbeat entries render as compact expandable cards and consecutive heartbeat streaks are collapsed to the latest item.
 
 ## Embeddings & Hybrid Memory Search
 

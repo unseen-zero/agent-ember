@@ -10,6 +10,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   if (updates.cwd !== undefined) sessions[id].cwd = updates.cwd
   if (updates.agentId !== undefined) sessions[id].agentId = updates.agentId
   if (updates.tools !== undefined) sessions[id].tools = updates.tools
+  if (updates.heartbeatEnabled !== undefined) sessions[id].heartbeatEnabled = updates.heartbeatEnabled
+  if (updates.heartbeatIntervalSec !== undefined) sessions[id].heartbeatIntervalSec = updates.heartbeatIntervalSec
   saveSessions(sessions)
   return NextResponse.json(sessions[id])
 }

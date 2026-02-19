@@ -3,19 +3,34 @@ import { tool, type StructuredToolInterface } from '@langchain/core/tools'
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import { execSync, execFile } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import * as cheerio from 'cheerio'
 import { getMemoryDb } from './memory-db'
 import { loadRuntimeSettings } from './runtime-settings'
+import {
+  clearManagedProcess,
+  getManagedProcess,
+  killManagedProcess,
+  listManagedProcesses,
+  pollManagedProcess,
+  readManagedProcessLog,
+  removeManagedProcess,
+  startManagedProcess,
+  writeManagedProcessStdin,
+} from './process-manager'
 import {
   loadAgents, saveAgents,
   loadTasks, saveTasks,
   loadSchedules, saveSchedules,
   loadSkills, saveSkills,
   loadConnectors, saveConnectors,
-  loadSessions,
+  loadSecrets, saveSecrets,
+  loadSessions, saveSessions,
   UPLOAD_DIR,
+  encryptKey,
+  decryptKey,
 } from './storage'
+import { log } from './logger'
 
 const MAX_OUTPUT = 50 * 1024 // 50KB
 const MAX_FILE = 100 * 1024 // 100KB
@@ -31,6 +46,20 @@ function safePath(cwd: string, filePath: string): string {
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
   return text.slice(0, max) + `\n... [truncated at ${max} bytes]`
+}
+
+function tail(text: string, max = 4000): string {
+  if (!text) return ''
+  return text.length <= max ? text : text.slice(text.length - max)
+}
+
+function coerceEnvMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v
+  }
+  return Object.keys(out).length ? out : undefined
 }
 
 function decodeDuckDuckGoUrl(rawUrl: string): string {
@@ -132,27 +161,141 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
   if (enabledTools.includes('shell')) {
     tools.push(
       tool(
-        async ({ command }) => {
+        async ({ command, background, yieldMs, timeoutSec, env, workdir }) => {
           try {
-            const output = execSync(command, {
-              cwd,
-              timeout: commandTimeoutMs,
-              maxBuffer: MAX_OUTPUT * 2,
-              encoding: 'utf-8',
-              stdio: ['pipe', 'pipe', 'pipe'],
+            const result = await startManagedProcess({
+              command,
+              cwd: workdir ? safePath(cwd, workdir) : cwd,
+              env: coerceEnvMap(env),
+              agentId: ctx?.agentId || null,
+              sessionId: ctx?.sessionId || null,
+              background: !!background,
+              yieldMs: typeof yieldMs === 'number' ? yieldMs : undefined,
+              timeoutMs: typeof timeoutSec === 'number'
+                ? Math.max(1, Math.trunc(timeoutSec)) * 1000
+                : commandTimeoutMs,
             })
-            return truncate(output || '(no output)', MAX_OUTPUT)
+            if (result.status === 'completed') {
+              return truncate(result.output || '(no output)', MAX_OUTPUT)
+            }
+            return JSON.stringify({
+              status: 'running',
+              processId: result.processId,
+              tail: result.tail || '',
+            }, null, 2)
           } catch (err: any) {
-            const stderr = err.stderr ? String(err.stderr) : ''
-            const stdout = err.stdout ? String(err.stdout) : ''
-            return truncate(`Exit code: ${err.status || 1}\n${stderr || stdout || err.message}`, MAX_OUTPUT)
+            return truncate(`Error: ${err.message || String(err)}`, MAX_OUTPUT)
           }
         },
         {
           name: 'execute_command',
-          description: 'Execute a shell command in the session working directory. Returns stdout/stderr.',
+          description: 'Execute a shell command in the session working directory. Supports background mode and timeout/yield controls.',
           schema: z.object({
             command: z.string().describe('The shell command to execute'),
+            background: z.boolean().optional().describe('If true, start command in background immediately'),
+            yieldMs: z.number().optional().describe('If command runs longer than this, return a running process id instead of blocking'),
+            timeoutSec: z.number().optional().describe('Per-command timeout in seconds'),
+            workdir: z.string().optional().describe('Relative working directory override'),
+            env: z.record(z.string(), z.string()).optional().describe('Environment variable overrides'),
+          }),
+        },
+      ),
+    )
+  }
+
+  if (enabledTools.includes('process')) {
+    tools.push(
+      tool(
+        async ({ action, processId, offset, limit, data, eof, signal }) => {
+          try {
+            if (action === 'list') {
+              return JSON.stringify(listManagedProcesses(ctx?.agentId || null).map((p) => ({
+                id: p.id,
+                command: p.command,
+                status: p.status,
+                pid: p.pid,
+                startedAt: p.startedAt,
+                endedAt: p.endedAt,
+                exitCode: p.exitCode,
+                signal: p.signal,
+              })), null, 2)
+            }
+
+            if (!processId) return 'Error: processId is required for this action.'
+
+            if (action === 'poll') {
+              const res = pollManagedProcess(processId)
+              if (!res) return `Process not found: ${processId}`
+              return JSON.stringify({
+                id: res.process.id,
+                status: res.process.status,
+                exitCode: res.process.exitCode,
+                signal: res.process.signal,
+                chunk: res.chunk,
+              }, null, 2)
+            }
+
+            if (action === 'log') {
+              const res = readManagedProcessLog(processId, offset, limit)
+              if (!res) return `Process not found: ${processId}`
+              return JSON.stringify({
+                id: res.process.id,
+                status: res.process.status,
+                totalLines: res.totalLines,
+                text: res.text,
+              }, null, 2)
+            }
+
+            if (action === 'write') {
+              const out = writeManagedProcessStdin(processId, data || '', !!eof)
+              return out.ok ? `Wrote to process ${processId}` : `Error: ${out.error}`
+            }
+
+            if (action === 'kill') {
+              const out = killManagedProcess(processId, (signal as NodeJS.Signals) || 'SIGTERM')
+              return out.ok ? `Killed process ${processId}` : `Error: ${out.error}`
+            }
+
+            if (action === 'clear') {
+              const out = clearManagedProcess(processId)
+              return out.ok ? `Cleared process ${processId}` : `Error: ${out.error}`
+            }
+
+            if (action === 'remove') {
+              const out = removeManagedProcess(processId)
+              return out.ok ? `Removed process ${processId}` : `Error: ${out.error}`
+            }
+
+            if (action === 'status') {
+              const p = getManagedProcess(processId)
+              if (!p) return `Process not found: ${processId}`
+              return JSON.stringify({
+                id: p.id,
+                status: p.status,
+                pid: p.pid,
+                startedAt: p.startedAt,
+                endedAt: p.endedAt,
+                exitCode: p.exitCode,
+                signal: p.signal,
+              }, null, 2)
+            }
+
+            return `Unknown action "${action}".`
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'process_tool',
+          description: 'Manage long-running shell processes started by execute_command. Supports list, status, poll, log, write, kill, clear, and remove.',
+          schema: z.object({
+            action: z.enum(['list', 'status', 'poll', 'log', 'write', 'kill', 'clear', 'remove']),
+            processId: z.string().optional(),
+            offset: z.number().optional(),
+            limit: z.number().optional(),
+            data: z.string().optional(),
+            eof: z.boolean().optional(),
+            signal: z.string().optional().describe('Signal for kill action, e.g. SIGTERM or SIGKILL'),
           }),
         },
       ),
@@ -277,28 +420,136 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
           try {
             const env: NodeJS.ProcessEnv = { ...process.env }
             // Running inside Claude environments can block nested `claude` launches.
-            // Clear these so delegation can run as an independent subprocess.
-            delete env.CLAUDECODE
-            delete env.CLAUDE_CODE_SESSION
-            delete env.CLAUDE_SESSION_ID
+            // Strip all CLAUDE* vars so delegation can run as an independent subprocess.
+            const removedClaudeEnvKeys: string[] = []
+            for (const key of Object.keys(env)) {
+              if (key.toUpperCase().startsWith('CLAUDE')) {
+                removedClaudeEnvKeys.push(key)
+                delete env[key]
+              }
+            }
+
+            // Fast preflight: when Claude isn't authenticated, surface a clear error immediately.
+            const authProbe = spawnSync('claude', ['auth', 'status'], {
+              cwd,
+              env,
+              encoding: 'utf-8',
+              timeout: 8000,
+            })
+            if ((authProbe.status ?? 1) !== 0) {
+              let loggedIn = false
+              try {
+                const parsed = JSON.parse(authProbe.stdout || '{}') as { loggedIn?: boolean }
+                loggedIn = parsed.loggedIn === true
+              } catch {
+                // ignore parse issues and fall back to a generic auth guidance
+              }
+              if (!loggedIn) {
+                return 'Error: Claude Code CLI is not authenticated. Run `claude auth login` (or `claude setup-token`) on this machine, then retry.'
+              }
+            }
+
+            log.info('session-tools', 'delegate_to_claude_code start', {
+              sessionId: ctx?.sessionId || null,
+              agentId: ctx?.agentId || null,
+              cwd,
+              timeoutMs: claudeTimeoutMs,
+              removedClaudeEnvKeys,
+              taskPreview: (task || '').slice(0, 200),
+            })
 
             return new Promise<string>((resolve) => {
-              const child = execFile(
-                'claude',
-                ['-p', task, '--output-format', 'text'],
-                { cwd, timeout: claudeTimeoutMs, maxBuffer: MAX_OUTPUT * 2, env, encoding: 'utf-8' },
-                (err, stdout, stderr) => {
-                  if (err && !stdout) {
-                    resolve(truncate(`Error: ${stderr || err.message}`, MAX_OUTPUT))
-                  } else {
-                    resolve(truncate(stdout || stderr || '(no output)', MAX_OUTPUT))
-                  }
-                },
-              )
-              // Kill on timeout safety net
-              setTimeout(() => {
+              const args = ['--print', '--output-format', 'text', '--dangerously-skip-permissions']
+              const child = spawn('claude', args, {
+                cwd,
+                env,
+                stdio: ['pipe', 'pipe', 'pipe'],
+              })
+              let stdout = ''
+              let stderr = ''
+              let settled = false
+              let timedOut = false
+              const startedAt = Date.now()
+
+              const finish = (result: string) => {
+                if (settled) return
+                settled = true
+                resolve(truncate(result, MAX_OUTPUT))
+              }
+
+              const timeoutHandle = setTimeout(() => {
+                timedOut = true
                 try { child.kill('SIGTERM') } catch { /* ignore */ }
-              }, claudeTimeoutMs + 5000)
+                setTimeout(() => {
+                  try { child.kill('SIGKILL') } catch { /* ignore */ }
+                }, 5000)
+              }, claudeTimeoutMs)
+
+              log.info('session-tools', 'delegate_to_claude_code spawned', {
+                sessionId: ctx?.sessionId || null,
+                pid: child.pid || null,
+                args,
+              })
+              child.stdout?.on('data', (chunk: Buffer) => {
+                stdout += chunk.toString()
+                if (stdout.length > MAX_OUTPUT * 8) stdout = tail(stdout, MAX_OUTPUT * 8)
+              })
+              child.stderr?.on('data', (chunk: Buffer) => {
+                stderr += chunk.toString()
+                if (stderr.length > MAX_OUTPUT * 8) stderr = tail(stderr, MAX_OUTPUT * 8)
+              })
+              child.on('error', (err) => {
+                clearTimeout(timeoutHandle)
+                log.error('session-tools', 'delegate_to_claude_code child error', {
+                  sessionId: ctx?.sessionId || null,
+                  error: err?.message || String(err),
+                })
+                finish(`Error: failed to start Claude Code CLI: ${err?.message || String(err)}`)
+              })
+              child.on('close', (code, signal) => {
+                clearTimeout(timeoutHandle)
+                const durationMs = Date.now() - startedAt
+                log.info('session-tools', 'delegate_to_claude_code child close', {
+                  sessionId: ctx?.sessionId || null,
+                  code,
+                  signal: signal || null,
+                  timedOut,
+                  durationMs,
+                  stdoutLen: stdout.length,
+                  stderrLen: stderr.length,
+                  stderrPreview: tail(stderr, 240),
+                })
+                if (timedOut) {
+                  const msg = [
+                    `Error: Claude Code CLI timed out after ${Math.round(claudeTimeoutMs / 1000)}s.`,
+                    stderr.trim() ? `stderr:\n${tail(stderr, 1500)}` : '',
+                    stdout.trim() ? `stdout:\n${tail(stdout, 1500)}` : '',
+                    'Try increasing "Claude Code Timeout (sec)" in Settings.',
+                  ].filter(Boolean).join('\n\n')
+                  finish(msg)
+                  return
+                }
+
+                if (code === 0 && (stdout.trim() || stderr.trim())) {
+                  finish(stdout.trim() || stderr.trim())
+                  return
+                }
+
+                const msg = [
+                  `Error: Claude Code CLI exited with code ${code ?? 'unknown'}${signal ? ` (signal ${signal})` : ''}.`,
+                  stderr.trim() ? `stderr:\n${tail(stderr, 1500)}` : '',
+                  stdout.trim() ? `stdout:\n${tail(stdout, 1500)}` : '',
+                ].filter(Boolean).join('\n\n')
+                finish(msg || 'Error: Claude Code CLI returned no output.')
+              })
+
+              try {
+                child.stdin?.write(task)
+                child.stdin?.end()
+              } catch (err: any) {
+                clearTimeout(timeoutHandle)
+                finish(`Error: failed to send task to Claude Code CLI: ${err?.message || String(err)}`)
+              }
             })
           } catch (err: any) {
             return `Error delegating to Claude Code: ${err.message}`
@@ -632,46 +883,68 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
 
     tools.push(
       tool(
-        async ({ action, key, value, category, query }) => {
+        async ({ action, key, value, category, query, scope }) => {
           try {
+            const scopeMode = scope || 'auto'
+            const currentAgentId = ctx?.agentId || null
+            const canAccessMemory = (m: any) => !m?.agentId || m.agentId === currentAgentId
+            const filterScope = (rows: any[]) => {
+              if (scopeMode === 'shared') return rows.filter((m) => !m.agentId)
+              if (scopeMode === 'agent') return rows.filter((m) => currentAgentId && m.agentId === currentAgentId)
+              // auto: shared + this agent's memories
+              return rows.filter(canAccessMemory)
+            }
+
             if (action === 'store') {
               const entry = memDb.add({
-                agentId: ctx?.agentId || null,
+                agentId: scopeMode === 'shared' ? null : currentAgentId,
                 sessionId: ctx?.sessionId || null,
                 category: category || 'note',
                 title: key,
                 content: value || '',
               })
-              return `Stored memory "${key}" (id: ${entry.id})`
+              const memoryScope = entry.agentId ? 'agent' : 'shared'
+              return `Stored ${memoryScope} memory "${key}" (id: ${entry.id})`
+            }
+            if (action === 'get') {
+              const found = memDb.get(key)
+              if (!found) return `Memory not found: ${key}`
+              if (!canAccessMemory(found)) return 'Error: you do not have access to that memory.'
+              const owner = found.agentId ? `agent:${found.agentId}` : 'shared'
+              return `[${found.id}] (${owner}) ${found.category}/${found.title}: ${found.content}`
             }
             if (action === 'search') {
-              const results = memDb.search(query || key, ctx?.agentId || undefined)
+              const results = filterScope(memDb.search(query || key))
               if (!results.length) return 'No memories found.'
-              return results.map((m) => `[${m.id}] ${m.title}: ${m.content}`).join('\n')
+              return results.map((m) => `[${m.id}] (${m.agentId ? `agent:${m.agentId}` : 'shared'}) ${m.title}: ${m.content}`).join('\n')
             }
             if (action === 'list') {
-              const results = memDb.list(ctx?.agentId || undefined)
+              const results = filterScope(memDb.list())
               if (!results.length) return 'No memories stored yet.'
-              return results.map((m) => `[${m.id}] ${m.category}/${m.title}: ${m.content}`).join('\n')
+              return results.map((m) => `[${m.id}] (${m.agentId ? `agent:${m.agentId}` : 'shared'}) ${m.category}/${m.title}: ${m.content}`).join('\n')
             }
             if (action === 'delete') {
+              const found = memDb.get(key)
+              if (!found) return `Memory not found: ${key}`
+              if (!canAccessMemory(found)) return 'Error: you do not have access to that memory.'
               memDb.delete(key)
               return `Deleted memory "${key}"`
             }
-            return `Unknown action "${action}". Use: store, search, list, or delete.`
+            return `Unknown action "${action}". Use: store, get, search, list, or delete.`
           } catch (err: any) {
             return `Error: ${err.message}`
           }
         },
         {
           name: 'memory_tool',
-          description: 'Store and retrieve long-term memories that persist across sessions. Use "store" to save knowledge, "search" to find relevant memories, "list" to see all memories, or "delete" to remove one.',
+          description: 'Store and retrieve long-term memories that persist across sessions. Memories can be shared or agent-scoped. Use "store", "get", "search", "list", and "delete".',
           schema: z.object({
-            action: z.enum(['store', 'search', 'list', 'delete']).describe('The action to perform'),
-            key: z.string().describe('For store: the memory title. For search: search query. For delete: the memory ID.'),
+            action: z.enum(['store', 'get', 'search', 'list', 'delete']).describe('The action to perform'),
+            key: z.string().describe('For store: memory title. For get/delete: memory ID. For search: optional query fallback.'),
             value: z.string().optional().describe('The memory content (for store action)'),
             category: z.string().optional().describe('Category like "note", "fact", "preference" (for store action, defaults to "note")'),
             query: z.string().optional().describe('Search query (alternative to key for search action)'),
+            scope: z.enum(['auto', 'shared', 'agent']).optional().describe('Scope hint: auto (shared + own), shared, or agent'),
           }),
         },
       ),
@@ -737,6 +1010,13 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
       enabled: p.enabled ?? false,
       ...p,
     }),
+    manage_secrets: (p) => ({
+      name: p.name || 'Unnamed Secret',
+      service: p.service || 'custom',
+      scope: p.scope || 'global',
+      agentIds: Array.isArray(p.agentIds) ? p.agentIds : [],
+      ...p,
+    }),
   }
 
   const PLATFORM_RESOURCES: Record<string, {
@@ -751,7 +1031,8 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     manage_schedules: { toolId: 'manage_schedules', label: 'schedules', load: loadSchedules, save: saveSchedules },
     manage_skills: { toolId: 'manage_skills', label: 'skills', load: loadSkills, save: saveSkills },
     manage_connectors: { toolId: 'manage_connectors', label: 'connectors', load: loadConnectors, save: saveConnectors },
-    manage_sessions: { toolId: 'manage_sessions', label: 'sessions', load: loadSessions, save: () => {}, readOnly: true },
+    manage_sessions: { toolId: 'manage_sessions', label: 'sessions', load: loadSessions, save: saveSessions, readOnly: true },
+    manage_secrets: { toolId: 'manage_secrets', label: 'secrets', load: loadSecrets, save: saveSecrets },
   }
 
   // Build dynamic agent summary for tools that need agent awareness
@@ -779,6 +1060,8 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
       } else {
         description += `\n\nSet "agentId" to assign a task to an agent (including yourself: "${ctx?.agentId || 'unknown'}"). Valid statuses: backlog, queued, running, completed, failed.` + agentSummary
       }
+    } else if (toolKey === 'manage_agents') {
+      description += `\n\nAgents may self-edit their own soul. To update your soul, use action="update", id="${ctx?.agentId || 'your-agent-id'}", and include data with the "soul" field.`
     } else if (toolKey === 'manage_schedules') {
       if (assignScope === 'self') {
         description += `\n\nSet "agentId" to assign a schedule to yourself ("${ctx?.agentId || 'unknown'}") or leave it null. You can only assign schedules to yourself. Schedule types: interval (set intervalMs), cron (set cron), once (set runAt). Set taskPrompt for what the agent should do.`
@@ -790,14 +1073,54 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     tools.push(
       tool(
         async ({ action, id, data }) => {
+          const canAccessSecret = (secret: any): boolean => {
+            if (!secret) return false
+            if (secret.scope !== 'agent') return true
+            if (!ctx?.agentId) return false
+            return Array.isArray(secret.agentIds) && secret.agentIds.includes(ctx.agentId)
+          }
           try {
             if (action === 'list') {
+              if (toolKey === 'manage_secrets') {
+                const values = Object.values(res.load())
+                  .filter((s: any) => canAccessSecret(s))
+                  .map((s: any) => ({
+                    id: s.id,
+                    name: s.name,
+                    service: s.service,
+                    scope: s.scope || 'global',
+                    agentIds: s.agentIds || [],
+                    createdAt: s.createdAt,
+                    updatedAt: s.updatedAt,
+                  }))
+                return JSON.stringify(values)
+              }
               return JSON.stringify(Object.values(res.load()))
             }
             if (action === 'get') {
               if (!id) return 'Error: "id" is required for get action.'
               const all = res.load()
-              return all[id] ? JSON.stringify(all[id]) : `Not found: ${res.label} "${id}"`
+              if (!all[id]) return `Not found: ${res.label} "${id}"`
+              if (toolKey === 'manage_secrets') {
+                if (!canAccessSecret(all[id])) return 'Error: you do not have access to this secret.'
+                let value = ''
+                try {
+                  value = all[id].encryptedValue ? decryptKey(all[id].encryptedValue) : ''
+                } catch {
+                  value = ''
+                }
+                return JSON.stringify({
+                  id: all[id].id,
+                  name: all[id].name,
+                  service: all[id].service,
+                  scope: all[id].scope || 'global',
+                  agentIds: all[id].agentIds || [],
+                  value,
+                  createdAt: all[id].createdAt,
+                  updatedAt: all[id].updatedAt,
+                })
+              }
+              return JSON.stringify(all[id])
             }
             if (res.readOnly) return `Cannot ${action} ${res.label} via this tool (read-only).`
             if (action === 'create') {
@@ -806,6 +1129,9 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               const raw = data ? JSON.parse(data) : {}
               const defaults = RESOURCE_DEFAULTS[toolKey]
               const parsed = defaults ? defaults(raw) : raw
+              if (parsed && typeof parsed === 'object' && 'id' in parsed) {
+                delete (parsed as Record<string, unknown>).id
+              }
               // Enforce assignment scope for tasks and schedules
               if (assignScope === 'self' && (toolKey === 'manage_tasks' || toolKey === 'manage_schedules')) {
                 if (parsed.agentId && parsed.agentId !== ctx?.agentId) {
@@ -821,15 +1147,43 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 createdAt: now,
                 updatedAt: now,
               }
-              all[newId] = entry
+              let responseEntry: any = entry
+              if (toolKey === 'manage_secrets') {
+                const secretValue = typeof parsed.value === 'string' ? parsed.value : null
+                if (!secretValue) return 'Error: data.value is required to create a secret.'
+                const normalizedScope = parsed.scope === 'agent' ? 'agent' : 'global'
+                const normalizedAgentIds = normalizedScope === 'agent'
+                  ? Array.from(new Set([
+                      ...(Array.isArray(parsed.agentIds) ? parsed.agentIds.filter((x: any) => typeof x === 'string') : []),
+                      ...(ctx?.agentId ? [ctx.agentId] : []),
+                    ]))
+                  : []
+                const stored = {
+                  ...entry,
+                  scope: normalizedScope,
+                  agentIds: normalizedAgentIds,
+                  encryptedValue: encryptKey(secretValue),
+                }
+                delete (stored as any).value
+                all[newId] = stored
+                const { encryptedValue, ...safe } = stored
+                responseEntry = safe
+              } else {
+                all[newId] = entry
+              }
               res.save(all)
-              return JSON.stringify(entry)
+              if (toolKey === 'manage_tasks' && entry.status === 'queued') {
+                const { enqueueTask } = await import('./queue')
+                enqueueTask(newId)
+              }
+              return JSON.stringify(responseEntry)
             }
             if (action === 'update') {
               if (!id) return 'Error: "id" is required for update action.'
               const all = res.load()
               if (!all[id]) return `Not found: ${res.label} "${id}"`
               const parsed = data ? JSON.parse(data) : {}
+              const prevStatus = all[id]?.status
               // Enforce assignment scope for tasks and schedules
               if (assignScope === 'self' && (toolKey === 'manage_tasks' || toolKey === 'manage_schedules')) {
                 if (parsed.agentId && parsed.agentId !== ctx?.agentId) {
@@ -837,13 +1191,50 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 }
               }
               all[id] = { ...all[id], ...parsed, updatedAt: Date.now() }
+              if (toolKey === 'manage_secrets') {
+                if (!canAccessSecret(all[id])) return 'Error: you do not have access to this secret.'
+                const nextScope = parsed.scope === 'agent'
+                  ? 'agent'
+                  : parsed.scope === 'global'
+                    ? 'global'
+                    : (all[id].scope === 'agent' ? 'agent' : 'global')
+                if (nextScope === 'agent') {
+                  const incomingIds = Array.isArray(parsed.agentIds)
+                    ? parsed.agentIds.filter((x: any) => typeof x === 'string')
+                    : Array.isArray(all[id].agentIds)
+                      ? all[id].agentIds
+                      : []
+                  all[id].agentIds = Array.from(new Set([
+                    ...incomingIds,
+                    ...(ctx?.agentId ? [ctx.agentId] : []),
+                  ]))
+                } else {
+                  all[id].agentIds = []
+                }
+                all[id].scope = nextScope
+                if (typeof parsed.value === 'string' && parsed.value.trim()) {
+                  all[id].encryptedValue = encryptKey(parsed.value)
+                }
+                delete all[id].value
+              }
               res.save(all)
+              if (toolKey === 'manage_tasks' && prevStatus !== 'queued' && all[id].status === 'queued') {
+                const { enqueueTask } = await import('./queue')
+                enqueueTask(id)
+              }
+              if (toolKey === 'manage_secrets') {
+                const { encryptedValue, ...safe } = all[id]
+                return JSON.stringify(safe)
+              }
               return JSON.stringify(all[id])
             }
             if (action === 'delete') {
               if (!id) return 'Error: "id" is required for delete action.'
               const all = res.load()
               if (!all[id]) return `Not found: ${res.label} "${id}"`
+              if (toolKey === 'manage_secrets' && !canAccessSecret(all[id])) {
+                return 'Error: you do not have access to this secret.'
+              }
               delete all[id]
               res.save(all)
               return JSON.stringify({ deleted: id })
@@ -860,6 +1251,233 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             action: z.enum(['list', 'get', 'create', 'update', 'delete']).describe('The CRUD action to perform'),
             id: z.string().optional().describe('Resource ID (required for get, update, delete)'),
             data: z.string().optional().describe('JSON string of fields for create/update'),
+          }),
+        },
+      ),
+    )
+  }
+
+  if (enabledTools.includes('manage_sessions')) {
+    tools.push(
+      tool(
+        async ({ action, sessionId, message, limit, agentId, name, waitForReply, timeoutSec, queueMode, heartbeatEnabled, finalStatus }) => {
+          try {
+            const sessions = loadSessions()
+            if (action === 'list') {
+              const { getSessionRunState } = await import('./session-run-manager')
+              const items = Object.values(sessions)
+                .sort((a: any, b: any) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0))
+                .slice(0, Math.max(1, Math.min(limit || 50, 200)))
+                .map((s: any) => {
+                  const runState = getSessionRunState(s.id)
+                  return {
+                    id: s.id,
+                    name: s.name,
+                    sessionType: s.sessionType || 'human',
+                    agentId: s.agentId || null,
+                    provider: s.provider,
+                    model: s.model,
+                    parentSessionId: s.parentSessionId || null,
+                    active: !!runState.runningRunId,
+                    queuedCount: runState.queueLength,
+                    heartbeatEnabled: s.heartbeatEnabled !== false,
+                    lastActiveAt: s.lastActiveAt,
+                    createdAt: s.createdAt,
+                  }
+                })
+              return JSON.stringify(items)
+            }
+
+            if (action === 'history') {
+              if (!sessionId) return 'Error: sessionId is required for history.'
+              const target = sessions[sessionId]
+              if (!target) return `Not found: session "${sessionId}"`
+              const max = Math.max(1, Math.min(limit || 20, 100))
+              const history = (target.messages || []).slice(-max).map((m: any) => ({
+                role: m.role,
+                text: m.text,
+                time: m.time,
+                kind: m.kind || 'chat',
+              }))
+              return JSON.stringify({ sessionId: target.id, name: target.name, history })
+            }
+
+            if (action === 'status') {
+              if (!sessionId) return 'Error: sessionId is required for status.'
+              const target = sessions[sessionId]
+              if (!target) return `Not found: session "${sessionId}"`
+              const { getSessionRunState } = await import('./session-run-manager')
+              const run = getSessionRunState(sessionId)
+              return JSON.stringify({
+                id: target.id,
+                name: target.name,
+                runningRunId: run.runningRunId || null,
+                queuedCount: run.queueLength,
+                heartbeatEnabled: target.heartbeatEnabled !== false,
+                lastActiveAt: target.lastActiveAt,
+                messageCount: (target.messages || []).length,
+              })
+            }
+
+            if (action === 'stop') {
+              if (!sessionId) return 'Error: sessionId is required for stop.'
+              if (!sessions[sessionId]) return `Not found: session "${sessionId}"`
+              const { cancelSessionRuns } = await import('./session-run-manager')
+              const out = cancelSessionRuns(sessionId, 'Stopped by manage_sessions')
+              return JSON.stringify({ sessionId, ...out })
+            }
+
+            if (action === 'send') {
+              if (!sessionId) return 'Error: sessionId is required for send.'
+              if (!message?.trim()) return 'Error: message is required for send.'
+              if (!sessions[sessionId]) return `Not found: session "${sessionId}"`
+              if (ctx?.sessionId && sessionId === ctx.sessionId) return 'Error: cannot send to the current session itself.'
+
+              const sourceSession = ctx?.sessionId ? sessions[ctx.sessionId] : null
+              const sourceLabel = sourceSession
+                ? `${sourceSession.name} (${sourceSession.id})`
+                : (ctx?.agentId ? `agent:${ctx.agentId}` : 'platform')
+              const bridgedMessage = `[Session message from ${sourceLabel}]\n${message.trim()}`
+
+              const { enqueueSessionRun } = await import('./session-run-manager')
+              const mode = queueMode === 'steer' || queueMode === 'collect' || queueMode === 'followup'
+                ? queueMode
+                : 'followup'
+              const run = enqueueSessionRun({
+                sessionId,
+                message: bridgedMessage,
+                source: 'session-send',
+                internal: false,
+                mode,
+              })
+
+              if (waitForReply === false) {
+                return JSON.stringify({
+                  sessionId,
+                  runId: run.runId,
+                  status: 'queued',
+                  mode,
+                })
+              }
+
+              const timeoutMs = Math.max(5, Math.min(timeoutSec || 120, 900)) * 1000
+              const result = await Promise.race([
+                run.promise,
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error(`Timed out waiting for session reply after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs),
+                ),
+              ])
+              return JSON.stringify({
+                sessionId,
+                runId: run.runId,
+                status: result.error ? 'failed' : 'completed',
+                reply: result.text || '',
+                error: result.error || null,
+              })
+            }
+
+            if (action === 'spawn') {
+              if (!agentId) return 'Error: agentId is required for spawn.'
+              const agents = loadAgents()
+              const agent = agents[agentId]
+              if (!agent) return `Not found: agent "${agentId}"`
+
+              const id = crypto.randomBytes(4).toString('hex')
+              const now = Date.now()
+              const entry = {
+                id,
+                name: (name || `${agent.name} Session`).trim(),
+                cwd,
+                user: 'swarm',
+                provider: agent.provider || 'claude-cli',
+                model: agent.model || '',
+                credentialId: agent.credentialId || null,
+                apiEndpoint: agent.apiEndpoint || null,
+                claudeSessionId: null,
+                messages: [],
+                createdAt: now,
+                lastActiveAt: now,
+                sessionType: 'orchestrated',
+                agentId: agent.id,
+                parentSessionId: ctx?.sessionId || null,
+                tools: agent.tools || [],
+                heartbeatEnabled: agent.heartbeatEnabled ?? null,
+                heartbeatIntervalSec: agent.heartbeatIntervalSec ?? null,
+              }
+              sessions[id] = entry as any
+              saveSessions(sessions)
+
+              let runId: string | null = null
+              if (message?.trim()) {
+                const { enqueueSessionRun } = await import('./session-run-manager')
+                const run = enqueueSessionRun({
+                  sessionId: id,
+                  message: message.trim(),
+                  source: 'session-spawn',
+                  internal: false,
+                  mode: 'followup',
+                })
+                runId = run.runId
+              }
+
+              return JSON.stringify({
+                sessionId: id,
+                name: entry.name,
+                agentId: agent.id,
+                queuedRunId: runId,
+              })
+            }
+
+            if (action === 'set_heartbeat') {
+              const targetSessionId = sessionId || ctx?.sessionId || null
+              if (!targetSessionId) return 'Error: sessionId is required when no current session context exists.'
+              const target = sessions[targetSessionId]
+              if (!target) return `Not found: session "${targetSessionId}"`
+              if (typeof heartbeatEnabled !== 'boolean') return 'Error: heartbeatEnabled (boolean) is required for set_heartbeat.'
+
+              target.heartbeatEnabled = heartbeatEnabled
+              target.lastActiveAt = Date.now()
+
+              let statusMessageAdded = false
+              if (!heartbeatEnabled && finalStatus?.trim()) {
+                if (!Array.isArray(target.messages)) target.messages = []
+                target.messages.push({
+                  role: 'assistant',
+                  text: finalStatus.trim(),
+                  time: Date.now(),
+                  kind: 'heartbeat',
+                })
+                statusMessageAdded = true
+              }
+
+              saveSessions(sessions)
+              return JSON.stringify({
+                sessionId: targetSessionId,
+                heartbeatEnabled: target.heartbeatEnabled !== false,
+                statusMessageAdded,
+              })
+            }
+
+            return 'Unknown action. Use list, history, status, send, spawn, stop, or set_heartbeat.'
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'sessions_tool',
+          description: 'Session-to-session operations: list/status/history sessions, send messages to other sessions, spawn new agent sessions, stop active runs, and control per-session heartbeat.',
+          schema: z.object({
+            action: z.enum(['list', 'history', 'status', 'send', 'spawn', 'stop', 'set_heartbeat']).describe('Session action'),
+            sessionId: z.string().optional().describe('Target session id (required for history/status/send/stop; optional for set_heartbeat when current session context exists)'),
+            message: z.string().optional().describe('Message body (required for send, optional initial task for spawn)'),
+            limit: z.number().optional().describe('Max items/messages for list/history'),
+            agentId: z.string().optional().describe('Agent id to spawn (required for spawn)'),
+            name: z.string().optional().describe('Optional session name for spawn'),
+            waitForReply: z.boolean().optional().describe('For send: if false, queue and return immediately'),
+            timeoutSec: z.number().optional().describe('For send with waitForReply=true, max wait time in seconds (default 120)'),
+            queueMode: z.enum(['followup', 'steer', 'collect']).optional().describe('Queue mode for send'),
+            heartbeatEnabled: z.boolean().optional().describe('For set_heartbeat: true to enable heartbeat, false to disable'),
+            finalStatus: z.string().optional().describe('For set_heartbeat when disabling: optional final status update to append in the session'),
           }),
         },
       ),

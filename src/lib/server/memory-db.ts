@@ -180,6 +180,12 @@ function initDb() {
       stmts.delete.run(id)
     },
 
+    get(id: string): MemoryEntry | null {
+      const row = stmts.getById.get(id) as any
+      if (!row) return null
+      return rowToEntry(row)
+    },
+
     search(query: string, agentId?: string): MemoryEntry[] {
       // FTS keyword search
       const ftsQuery = query.split(/\s+/).filter(Boolean).map((w) => `"${w}"`).join(' OR ')

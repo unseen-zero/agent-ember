@@ -7,6 +7,7 @@ import { loadSettings, loadAgents, loadSkills, appendUsage } from './storage'
 import { estimateCost } from './cost'
 import { getPluginManager } from './plugins'
 import { loadRuntimeSettings, getAgentLoopRecursionLimit } from './runtime-settings'
+import { getMemoryDb } from './memory-db'
 import type { Session, Message, UsageRecord } from '@/types'
 
 interface StreamAgentChatOpts {
@@ -18,11 +19,13 @@ interface StreamAgentChatOpts {
   write: (data: string) => void
   history: Message[]
   fallbackCredentialIds?: string[]
+  signal?: AbortSignal
 }
 
 function buildToolCapabilityLines(enabledTools: string[]): string[] {
   const lines: string[] = []
   if (enabledTools.includes('shell')) lines.push('- Shell execution is available (`execute_command`). Use it for real checks/build/test steps.')
+  if (enabledTools.includes('process')) lines.push('- Process control is available (`process_tool`) for long-running commands (poll/log/write/kill).')
   if (enabledTools.includes('files')) lines.push('- File operations are available (`read_file`, `write_file`, `list_files`, `send_file`). Use them to inspect and produce artifacts.')
   if (enabledTools.includes('edit_file')) lines.push('- Precise single-match replacement is available (`edit_file`).')
   if (enabledTools.includes('web_search')) lines.push('- Web search is available (`web_search`). Use it for external research, options discovery, and validation.')
@@ -35,7 +38,8 @@ function buildToolCapabilityLines(enabledTools: string[]): string[] {
   if (enabledTools.includes('manage_schedules')) lines.push('- Schedule management is available (`manage_schedules`) for recurring/ongoing runs.')
   if (enabledTools.includes('manage_skills')) lines.push('- Skill management is available (`manage_skills`) to add reusable capabilities.')
   if (enabledTools.includes('manage_connectors')) lines.push('- Connector management is available (`manage_connectors`) for channels like WhatsApp/Telegram/Slack.')
-  if (enabledTools.includes('manage_sessions')) lines.push('- Session management is available (`manage_sessions`) to inspect current platform activity.')
+  if (enabledTools.includes('manage_sessions')) lines.push('- Session management is available (`manage_sessions` + `sessions_tool`) for session discovery, delegation, and inter-session messaging.')
+  if (enabledTools.includes('manage_secrets')) lines.push('- Secret management is available (`manage_secrets`) for durable encrypted credentials and API tokens.')
   return lines
 }
 
@@ -76,7 +80,11 @@ function buildAgenticExecutionPolicy(opts: {
     opts.enabledTools.includes('manage_sessions')
       ? 'When coordinating platform work, inspect existing sessions and avoid duplicating active efforts.'
       : '',
+    opts.enabledTools.includes('memory')
+      ? 'Memory is passive but important: before major tasks, run memory_tool search/list for relevant prior work; after meaningful progress, store concise reusable notes (what was built, where it lives, key constraints, next steps). Treat memory as shared context plus your own agent notes, not as user-owned personal profile data.'
+      : '',
     'Ask for confirmation only for high-risk or irreversible actions. For normal low-risk research/build steps, proceed autonomously.',
+    'Do not pause for a "continue" confirmation after the user has already asked you to execute a goal. Keep moving until blocked by permissions, missing credentials, or hard tool failures.',
     `Heartbeat protocol: if the user message is exactly "${opts.heartbeatPrompt}", reply exactly "HEARTBEAT_OK" when there is nothing important to report; otherwise reply with a concise progress update and immediate next step.`,
     opts.heartbeatIntervalSec > 0
       ? `Expected heartbeat cadence is roughly every ${opts.heartbeatIntervalSec} seconds while ongoing work is active.`
@@ -86,7 +94,7 @@ function buildAgenticExecutionPolicy(opts: {
 }
 
 export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string> {
-  const { session, message, imagePath, apiKey, systemPrompt, write, history, fallbackCredentialIds } = opts
+  const { session, message, imagePath, apiKey, systemPrompt, write, history, fallbackCredentialIds, signal } = opts
 
   // fallbackCredentialIds is intentionally accepted for compatibility with caller signatures.
   void fallbackCredentialIds
@@ -144,6 +152,27 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
 
   if (!hasProvidedSystemPrompt) {
     stateModifierParts.push('You are a capable AI assistant with tool access. Be execution-oriented and outcome-focused.')
+  }
+
+  if ((session.tools || []).includes('memory') && session.agentId) {
+    try {
+      const memDb = getMemoryDb()
+      const recent = memDb
+        .list(session.agentId)
+        .slice(-8)
+        .map((m) => `- [${m.category}] ${m.title}: ${m.content.slice(0, 200)}`)
+      if (recent.length > 0) {
+        stateModifierParts.push(
+          [
+            '## Recent Memory Context',
+            'Use these as prior context when relevant, then verify/update with memory_tool as needed.',
+            ...recent,
+          ].join('\n'),
+        )
+      }
+    } catch {
+      // If memory context fails to load, continue without blocking the run.
+    }
   }
 
   stateModifierParts.push(
@@ -211,6 +240,11 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
   await pluginMgr.runHook('beforeAgentStart', { session, message })
 
   const abortController = new AbortController()
+  const abortFromSignal = () => abortController.abort()
+  if (signal) {
+    if (signal.aborted) abortController.abort()
+    else signal.addEventListener('abort', abortFromSignal)
+  }
   let timedOut = false
   const loopTimer = runtime.loopMode === 'ongoing' && runtime.ongoingLoopMaxRuntimeMs
     ? setTimeout(() => {
@@ -285,6 +319,7 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
     write(`data: ${JSON.stringify({ t: 'err', text: errMsg })}\n\n`)
   } finally {
     if (loopTimer) clearTimeout(loopTimer)
+    if (signal) signal.removeEventListener('abort', abortFromSignal)
   }
 
   // Track cost

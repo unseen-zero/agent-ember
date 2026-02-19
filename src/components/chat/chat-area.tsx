@@ -3,15 +3,16 @@
 import { useEffect, useCallback, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
 import { useChatStore } from '@/stores/use-chat-store'
-import { fetchMessages, clearMessages, deleteSession, devServer, stopSession, checkBrowser, stopBrowser } from '@/lib/sessions'
+import { fetchMessages, clearMessages, deleteSession, devServer, checkBrowser, stopBrowser } from '@/lib/sessions'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { ChatHeader } from './chat-header'
 import { DevServerBar } from './dev-server-bar'
 import { MessageList } from './message-list'
 import { SessionDebugPanel } from './session-debug-panel'
 import { ChatInput } from '@/components/input/chat-input'
-import { Dropdown, DropdownItem, DropdownSep } from '@/components/shared/dropdown'
+import { Dropdown, DropdownItem } from '@/components/shared/dropdown'
 import { ConfirmDialog } from '@/components/shared/confirm-dialog'
+import { speak } from '@/lib/tts'
 
 const PROMPT_SUGGESTIONS = [
   { text: 'List all my sessions and agents', icon: 'book', gradient: 'from-[#6366F1]/10 to-[#818CF8]/5' },
@@ -31,7 +32,7 @@ export function ChatArea() {
   const removeSessionFromStore = useAppStore((s) => s.removeSession)
   const loadSessions = useAppStore((s) => s.loadSessions)
   const appSettings = useAppStore((s) => s.appSettings)
-  const { messages, setMessages, streaming, sendMessage, sendHeartbeat, stopStreaming, devServer: devServerStatus, setDevServer, debugOpen, setDebugOpen } = useChatStore()
+  const { messages, setMessages, streaming, streamingSessionId, sendMessage, stopStreaming, devServer: devServerStatus, setDevServer, debugOpen, setDebugOpen, ttsEnabled } = useChatStore()
   const isDesktop = useMediaQuery('(min-width: 768px)')
 
   const [menuOpen, setMenuOpen] = useState(false)
@@ -41,16 +42,27 @@ export function ChatArea() {
 
   useEffect(() => {
     if (!sessionId) return
-    // Clear stale state from the previous session
+    const chatState = useChatStore.getState()
+    const preserveLocalStream = chatState.streaming && chatState.streamingSessionId === sessionId
+    // Clear stale state from the previous session, but keep active local stream state for this session.
     setMessages([])
-    useChatStore.setState({ streaming: false, streamText: '', toolEvents: [] })
+    if (!preserveLocalStream) {
+      useChatStore.setState({ streaming: false, streamingSessionId: null, streamText: '', toolEvents: [] })
+    }
     fetchMessages(sessionId).then(setMessages).catch(() => {
       setMessages(session?.messages || [])
     })
     // If server reports session is still active, show streaming state
     if (session?.active) {
-      useChatStore.setState({ streaming: true, streamText: '' })
+      useChatStore.setState({ streaming: true, streamingSessionId: sessionId, streamText: '' })
     }
+    // Refresh active state from server so returning to a session restores typing indicator.
+    loadSessions().then(() => {
+      const refreshed = useAppStore.getState().sessions[sessionId]
+      if (refreshed?.active) {
+        useChatStore.setState({ streaming: true, streamingSessionId: sessionId, streamText: '' })
+      }
+    }).catch(() => {})
     devServer(sessionId, 'status').then((r) => {
       setDevServer(r.running ? r : null)
     }).catch(() => setDevServer(null))
@@ -65,13 +77,25 @@ export function ChatArea() {
   // Auto-poll messages for orchestrated or server-active sessions
   const isOrchestrated = session?.sessionType === 'orchestrated'
   const isServerActive = session?.active === true
+  const isOngoingMonitored = appSettings.loopMode === 'ongoing' && !!session?.tools?.length
   useEffect(() => {
-    if (!sessionId || (!isOrchestrated && !isServerActive)) return
+    if (!sessionId || (!isOrchestrated && !isServerActive && !isOngoingMonitored)) return
     const interval = setInterval(async () => {
       try {
         const msgs = await fetchMessages(sessionId)
         if (msgs.length > messages.length) {
+          const newMsgs = msgs.slice(messages.length)
           setMessages(msgs)
+          if (ttsEnabled && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+            const latestAssistant = [...newMsgs].reverse().find((m) => {
+              if (m.role !== 'assistant') return false
+              const isHeartbeat = m.kind === 'heartbeat' || /^\s*HEARTBEAT_OK\b/i.test(m.text || '')
+              return !isHeartbeat && !!m.text?.trim()
+            })
+            if (latestAssistant?.text) {
+              void speak(latestAssistant.text)
+            }
+          }
         }
         // Check if session is still active on the server
         if (isServerActive) {
@@ -80,15 +104,21 @@ export function ChatArea() {
       } catch {}
     }, 2000)
     return () => clearInterval(interval)
-  }, [sessionId, isOrchestrated, isServerActive, messages.length])
+  }, [sessionId, isOrchestrated, isServerActive, isOngoingMonitored, messages.length])
 
   // When server-active flag drops, stop the streaming indicator
   useEffect(() => {
     if (!sessionId) return
-    if (!isServerActive && streaming && !useChatStore.getState().streamText) {
+    const state = useChatStore.getState()
+    if (
+      !isServerActive
+      && state.streaming
+      && (state.streamingSessionId === sessionId || state.streamingSessionId == null)
+      && !state.streamText
+    ) {
       // Server finished but we weren't the ones streaming — clear the indicator
       fetchMessages(sessionId).then(setMessages).catch(() => {})
-      useChatStore.setState({ streaming: false, streamText: '' })
+      useChatStore.setState({ streaming: false, streamingSessionId: null, streamText: '' })
     }
   }, [isServerActive, sessionId])
 
@@ -102,50 +132,10 @@ export function ChatArea() {
     return () => clearInterval(interval)
   }, [sessionId, hasBrowserTool])
 
-  // Heartbeat polling for ongoing sessions.
-  useEffect(() => {
-    if (!sessionId || !session?.tools?.length) return
-    if (appSettings.loopMode !== 'ongoing') return
-
-    const raw = appSettings.heartbeatIntervalSec
-    const parsed = typeof raw === 'number'
-      ? raw
-      : typeof raw === 'string'
-        ? Number.parseInt(raw, 10)
-        : Number.NaN
-    const intervalSec = Number.isFinite(parsed) ? Math.max(0, parsed) : 120
-    if (intervalSec <= 0) return
-
-    const interval = setInterval(() => {
-      if (useAppStore.getState().currentSessionId !== sessionId) return
-      if (useChatStore.getState().streaming) return
-      sendHeartbeat(sessionId).catch(() => {})
-    }, intervalSec * 1000)
-
-    return () => clearInterval(interval)
-  }, [sessionId, session?.tools?.length, appSettings.loopMode, appSettings.heartbeatIntervalSec, sendHeartbeat])
-
   const handleStopBrowser = useCallback(async () => {
     if (!sessionId) return
     await stopBrowser(sessionId)
     setBrowserActive(false)
-  }, [sessionId])
-
-  const handleDeploy = useCallback(() => {
-    setMenuOpen(false)
-    sendMessage('Please git add all changes, commit with a short descriptive message, and push to the remote. Do it now without asking.')
-  }, [sendMessage])
-
-  const handleDevServer = useCallback(async () => {
-    if (!sessionId) return
-    setMenuOpen(false)
-    setDevServer({ running: false, url: 'Starting dev server...' })
-    try {
-      const r = await devServer(sessionId, 'start')
-      setDevServer(r.running ? r : null)
-    } catch {
-      setDevServer(null)
-    }
   }, [sessionId])
 
   const handleStopDevServer = useCallback(async () => {
@@ -180,15 +170,16 @@ export function ChatArea() {
 
   if (!session) return null
 
+  const streamingForThisSession = streaming && (!streamingSessionId || streamingSessionId === session.id)
   const isMainChat = session.name === '__main__'
-  const isEmpty = !messages.length && !streaming
+  const isEmpty = !messages.length && !streamingForThisSession
 
   return (
     <div className="flex-1 flex flex-col h-full min-h-0 relative">
       {isDesktop && (
         <ChatHeader
           session={session}
-          streaming={streaming}
+          streaming={streamingForThisSession}
           onStop={stopStreaming}
           onMenuToggle={() => setMenuOpen(!menuOpen)}
           onBack={handleBack}
@@ -199,7 +190,7 @@ export function ChatArea() {
       {!isDesktop && (
         <ChatHeader
           session={session}
-          streaming={streaming}
+          streaming={streamingForThisSession}
           onStop={stopStreaming}
           onMenuToggle={() => setMenuOpen(!menuOpen)}
           mobile
@@ -260,7 +251,7 @@ export function ChatArea() {
           </div>
         </div>
       ) : (
-        <MessageList messages={messages} streaming={streaming} />
+        <MessageList messages={messages} streaming={streamingForThisSession} />
       )}
 
       <SessionDebugPanel
@@ -270,17 +261,12 @@ export function ChatArea() {
       />
 
       <ChatInput
-        streaming={streaming}
+        streaming={streamingForThisSession}
         onSend={sendMessage}
         onStop={stopStreaming}
       />
 
       <Dropdown open={menuOpen} onClose={() => setMenuOpen(false)}>
-        <DropdownItem onClick={handleDeploy}>Deploy (commit + push)</DropdownItem>
-        <DropdownItem onClick={handleDevServer}>
-          {devServerStatus?.running ? 'Dev Server Running' : 'Start Dev Server'}
-        </DropdownItem>
-        <DropdownSep />
         <DropdownItem onClick={() => { setMenuOpen(false); setConfirmClear(true) }}>
           Clear History
         </DropdownItem>

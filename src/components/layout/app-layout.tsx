@@ -92,6 +92,9 @@ export function AppLayout() {
     if (mainSession) setCurrentSession(mainSession.id)
     setActiveView('sessions')
     setSidebarOpen(false)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('swarmclaw:scroll-bottom'))
+    }
   }
 
   return (

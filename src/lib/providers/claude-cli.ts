@@ -1,7 +1,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { spawn } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import type { StreamChatOptions } from './index'
 import { log } from '../server/logger'
 import { loadRuntimeSettings } from '../server/runtime-settings'
@@ -31,7 +31,7 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
     prompt = `[The user has shared an image at: ${imagePath}]\n\n${message}`
   }
 
-  const args = ['-p', '-', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions']
+  const args = ['--print', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions']
   if (session.claudeSessionId) args.push('--resume', session.claudeSessionId)
   if (session.model) args.push('--model', session.model)
 
@@ -61,9 +61,31 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
   }
 
   const env = { ...process.env, TERM: 'dumb', NO_COLOR: '1' } as NodeJS.ProcessEnv
-  delete (env as Record<string, unknown>)['CLAUDECODE']
-  delete (env as Record<string, unknown>)['CLAUDE_CODE_SESSION']
-  delete (env as Record<string, unknown>)['CLAUDE_CODE_ENTRYPOINT']
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith('CLAUDE')) delete (env as Record<string, unknown>)[key]
+  }
+
+  const authProbe = spawnSync(CLAUDE, ['auth', 'status'], {
+    cwd: session.cwd,
+    env,
+    encoding: 'utf-8',
+    timeout: 8000,
+  })
+  if ((authProbe.status ?? 1) !== 0) {
+    let loggedIn = false
+    try {
+      const parsed = JSON.parse(authProbe.stdout || '{}') as { loggedIn?: boolean }
+      loggedIn = parsed.loggedIn === true
+    } catch {
+      // Ignore parse issues and surface generic auth guidance.
+    }
+    if (!loggedIn) {
+      const msg = 'Claude CLI is not authenticated. Run `claude auth login` (or `claude setup-token`) and try again.'
+      log.error('claude-cli', msg)
+      write(`data: ${JSON.stringify({ t: 'err', text: msg })}\n\n`)
+      return Promise.resolve('')
+    }
+  }
 
   log.info('claude-cli', `Spawning: ${CLAUDE}`, {
     args: args.map(a => a.length > 100 ? a.slice(0, 100) + '...' : a),
@@ -89,6 +111,7 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
   let fullResponse = ''
   let buf = ''
   let eventCount = 0
+  let stderrText = ''
 
   proc.stdout!.on('data', (chunk: Buffer) => {
     const raw = chunk.toString()
@@ -149,6 +172,8 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
 
   proc.stderr!.on('data', (chunk: Buffer) => {
     const text = chunk.toString()
+    stderrText += text
+    if (stderrText.length > 16_000) stderrText = stderrText.slice(-16_000)
     log.warn('claude-cli', `stderr [${session.id}]`, text.slice(0, 500))
     console.error(`[${session.id}] stderr:`, text.slice(0, 200))
   })
@@ -158,6 +183,12 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
       log.info('claude-cli', `Process closed: code=${code} signal=${signal} events=${eventCount} response=${fullResponse.length}chars`)
       active.delete(session.id)
       if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath) } catch { /* ignore */ }
+      if ((code ?? 0) !== 0 && !fullResponse.trim()) {
+        const msg = stderrText.trim()
+          ? `Claude CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}: ${stderrText.trim().slice(0, 1200)}`
+          : `Claude CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''} and returned no output.`
+        write(`data: ${JSON.stringify({ t: 'err', text: msg })}\n\n`)
+      }
       resolve(fullResponse)
     })
 

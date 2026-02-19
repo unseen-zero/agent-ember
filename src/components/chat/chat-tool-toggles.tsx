@@ -6,9 +6,16 @@ import { api } from '@/lib/api-client'
 import type { Session } from '@/types'
 
 const ALL_TOOLS: Record<string, string> = {
+  execute_command: 'Shell',
+  read_file: 'Read File',
+  write_file: 'Write File',
+  list_files: 'List Files',
+  send_file: 'Send File',
+  delegate_to_claude_code: 'Claude Code',
   shell: 'Shell',
   files: 'Files',
   edit_file: 'Edit File',
+  process: 'Process',
   web_search: 'Web Search',
   web_fetch: 'Web Fetch',
   claude_code: 'Claude Code',
@@ -20,6 +27,7 @@ const ALL_TOOLS: Record<string, string> = {
   manage_skills: 'Skills',
   manage_connectors: 'Connectors',
   manage_sessions: 'Sessions',
+  manage_secrets: 'Secrets',
 }
 
 interface Props {
@@ -36,6 +44,7 @@ export function ChatToolToggles({ session }: Props) {
   const agent = session.agentId ? agents[session.agentId] : null
   const agentTools: string[] = agent?.tools || []
   const sessionTools: string[] = session.tools || []
+  const availableTools: string[] = Array.from(new Set([...agentTools, ...sessionTools]))
 
   // Agent's skill IDs
   const agentSkillIds: string[] = agent?.skillIds || []
@@ -57,12 +66,12 @@ export function ChatToolToggles({ session }: Props) {
     loadSessions()
   }
 
-  // Separate agent tools into categories
-  const regularTools = agentTools.filter((t) => !t.startsWith('manage_'))
-  const platformTools = agentTools.filter((t) => t.startsWith('manage_'))
+  // Separate available tools into categories
+  const regularTools = availableTools.filter((t) => !t.startsWith('manage_'))
+  const platformTools = availableTools.filter((t) => t.startsWith('manage_'))
 
   const enabledCount = sessionTools.length
-  const totalCount = agentTools.length
+  const totalCount = availableTools.length
 
   return (
     <div className="relative" ref={ref}>
@@ -80,8 +89,8 @@ export function ChatToolToggles({ session }: Props) {
       </button>
 
       {open && (
-        <div className="absolute top-full left-0 mt-1.5 w-[240px] rounded-[12px] border border-white/[0.08] shadow-xl z-50 overflow-hidden"
-          style={{ animation: 'fade-in 0.15s ease', backgroundColor: '#1e1e30' }}>
+        <div className="absolute top-full left-0 mt-1.5 w-[240px] rounded-[12px] border border-white/[0.08] shadow-xl z-[120] overflow-hidden"
+          style={{ animation: 'fade-in 0.15s ease', backgroundColor: '#171a2b' }}>
           {regularTools.length > 0 && (
             <div className="px-3 pt-3 pb-1">
               <p className="text-[10px] font-600 text-text-3/60 uppercase tracking-wider mb-2">Tools</p>
@@ -136,9 +145,9 @@ export function ChatToolToggles({ session }: Props) {
             </div>
           )}
 
-          {agentTools.length === 0 && agentSkillIds.length === 0 && (
+          {availableTools.length === 0 && agentSkillIds.length === 0 && (
             <div className="px-3 py-4 text-center">
-              <p className="text-[12px] text-text-3/60">No tools configured for this agent</p>
+              <p className="text-[12px] text-text-3/60">No tools configured for this session</p>
             </div>
           )}
 

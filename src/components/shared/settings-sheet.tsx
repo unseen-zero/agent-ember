@@ -106,7 +106,7 @@ export function SettingsSheet() {
   }
 
   const orchestrators = Object.values(agents).filter((p) => p.isOrchestrator)
-  const secretList = Object.values(secrets)
+  const secretList = Object.entries(secrets).map(([rowId, secret]) => ({ ...secret, rowId }))
 
   // LangGraph config
   const lgProviders = providers.filter((p) => !NON_LANGGRAPH_PROVIDER_IDS.has(String(p.id)))
@@ -592,7 +592,7 @@ export function SettingsSheet() {
         {secretList.length > 0 && (
           <div className="space-y-2.5 mb-4">
             {secretList.map((secret) => (
-              <div key={secret.id} className="flex items-center gap-3 py-3 px-4 rounded-[14px] bg-surface border border-white/[0.06]">
+              <div key={secret.rowId} className="flex items-center gap-3 py-3 px-4 rounded-[14px] bg-surface border border-white/[0.06]">
                 <div className="flex-1 min-w-0">
                   <div className="text-[14px] font-600 text-text truncate">{secret.name}</div>
                   <div className="flex items-center gap-2 mt-0.5">
@@ -606,13 +606,13 @@ export function SettingsSheet() {
                     </span>
                   </div>
                 </div>
-                {deletingSecret === secret.id ? (
+                {deletingSecret === secret.rowId ? (
                   <div className="flex gap-2">
                     <button onClick={() => setDeletingSecret(null)} className="px-3 py-1.5 text-[13px] font-600 bg-transparent border-none text-text-3 cursor-pointer hover:text-text-2 transition-colors" style={{ fontFamily: 'inherit' }}>Keep</button>
-                    <button onClick={() => handleDeleteSecret(secret.id)} className="px-3 py-1.5 text-[13px] font-600 bg-danger text-white border-none cursor-pointer rounded-[8px] transition-colors hover:brightness-110" style={{ fontFamily: 'inherit' }}>Delete</button>
+                    <button onClick={() => handleDeleteSecret(secret.rowId)} className="px-3 py-1.5 text-[13px] font-600 bg-danger text-white border-none cursor-pointer rounded-[8px] transition-colors hover:brightness-110" style={{ fontFamily: 'inherit' }}>Delete</button>
                   </div>
                 ) : (
-                  <button onClick={() => setDeletingSecret(secret.id)} className="px-3 py-1.5 text-[13px] font-500 bg-transparent border-none text-text-3 cursor-pointer hover:text-danger transition-colors" style={{ fontFamily: 'inherit' }}>Remove</button>
+                  <button onClick={() => setDeletingSecret(secret.rowId)} className="px-3 py-1.5 text-[13px] font-500 bg-transparent border-none text-text-3 cursor-pointer hover:text-danger transition-colors" style={{ fontFamily: 'inherit' }}>Remove</button>
                 )}
               </div>
             ))}

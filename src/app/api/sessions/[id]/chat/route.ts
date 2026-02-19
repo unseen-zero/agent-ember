@@ -1,240 +1,74 @@
 import { NextResponse } from 'next/server'
-import fs from 'fs'
-import {
-  loadSessions, saveSessions, active,
-  loadCredentials, decryptKey, getSessionMessages,
-  loadAgents, loadSkills,
-} from '@/lib/server/storage'
-import { getProvider } from '@/lib/providers'
+import { enqueueSessionRun, type SessionQueueMode } from '@/lib/server/session-run-manager'
 import { log } from '@/lib/server/logger'
-import { streamAgentChat } from '@/lib/server/stream-agent-chat'
-import type { MessageToolEvent } from '@/types'
+
+function normalizeQueueMode(raw: unknown, internal: boolean): SessionQueueMode {
+  if (raw === 'steer' || raw === 'collect' || raw === 'followup') return raw
+  return internal ? 'collect' : 'followup'
+}
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const { message, imagePath, imageUrl, internal } = await req.json()
-  const isInternal = internal === true
+  const body = await req.json().catch(() => ({}))
 
-  log.info('chat', `POST /sessions/${id}/chat`, { message: message?.slice(0, 100), imagePath, imageUrl, internal: isInternal })
+  const message = typeof body.message === 'string' ? body.message : ''
+  const imagePath = typeof body.imagePath === 'string' ? body.imagePath : undefined
+  const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl : undefined
+  const internal = body.internal === true
+  const queueMode = normalizeQueueMode(body.queueMode, internal)
 
-  const sessions = loadSessions()
-  const session = sessions[id]
-  if (!session) {
-    log.error('chat', `Session not found: ${id}`)
-    return new NextResponse(null, { status: 404 })
+  if (!message.trim()) {
+    return NextResponse.json({ error: 'message is required' }, { status: 400 })
   }
 
-  if (active.has(id)) {
-    log.warn('chat', `Session busy: ${id}`)
-    return NextResponse.json({ error: 'Session is busy' }, { status: 409 })
-  }
-
-  // Sync session config from current agent (agent may have been updated since session creation)
-  if (session.agentId) {
-    const agents = loadAgents()
-    const agent = agents[session.agentId]
-    if (agent) {
-      let changed = false
-      if (agent.provider && agent.provider !== session.provider) { session.provider = agent.provider; changed = true }
-      if (agent.model !== undefined && agent.model !== session.model) { session.model = agent.model; changed = true }
-      if (agent.credentialId !== undefined && agent.credentialId !== session.credentialId) { session.credentialId = agent.credentialId ?? null; changed = true }
-      if (agent.apiEndpoint !== undefined && agent.apiEndpoint !== session.apiEndpoint) { session.apiEndpoint = agent.apiEndpoint ?? null; changed = true }
-      if (agent.tools && JSON.stringify(agent.tools) !== JSON.stringify(session.tools)) { session.tools = agent.tools; changed = true }
-      if (changed) {
-        log.info('chat', `Synced session ${id} config from agent ${agent.name}`, { provider: session.provider, model: session.model })
-        saveSessions(sessions)
-      }
-    }
-  }
-
-  const providerType = session.provider || 'claude-cli'
-  const provider = getProvider(providerType)
-  if (!provider) {
-    log.error('chat', `Unknown provider: ${providerType}`)
-    return NextResponse.json({ error: `Unknown provider: ${providerType}` }, { status: 400 })
-  }
-
-  log.info('chat', `Session config`, {
-    provider: providerType,
-    model: session.model,
-    cwd: session.cwd,
-    agentId: session.agentId,
-    tools: session.tools,
-    hasClaudeSessionId: !!session.claudeSessionId,
-  })
-
-  // Claude CLI requires a valid cwd
-  if (providerType === 'claude-cli' && !fs.existsSync(session.cwd)) {
-    log.error('chat', `Directory not found: ${session.cwd}`)
-    return NextResponse.json({ error: `Directory not found: ${session.cwd}` }, { status: 400 })
-  }
-
-  // Resolve API key for providers that need one
-  let apiKey: string | null = null
-  if (provider.requiresApiKey) {
-    if (!session.credentialId) {
-      log.error('chat', 'No API key configured')
-      return NextResponse.json({ error: 'No API key configured for this session' }, { status: 400 })
-    }
-    const creds = loadCredentials()
-    const cred = creds[session.credentialId]
-    if (!cred) {
-      log.error('chat', 'API key not found in credentials')
-      return NextResponse.json({ error: 'API key not found. Please add one in Settings.' }, { status: 400 })
-    }
-    try {
-      apiKey = decryptKey(cred.encryptedKey)
-    } catch {
-      log.error('chat', 'Failed to decrypt API key')
-      return NextResponse.json({ error: 'Failed to decrypt API key' }, { status: 500 })
-    }
-  } else if (provider.optionalApiKey && session.credentialId) {
-    const creds = loadCredentials()
-    const cred = creds[session.credentialId]
-    if (cred) {
-      try {
-        apiKey = decryptKey(cred.encryptedKey)
-      } catch {
-        log.warn('chat', 'Failed to decrypt optional API key, continuing without it')
-      }
-    }
-  }
-
-  if (!isInternal) {
-    session.messages.push({
-      role: 'user',
-      text: message,
-      time: Date.now(),
-      imagePath: imagePath || undefined,
-      imageUrl: imageUrl || undefined,
-    })
-    session.lastActiveAt = Date.now()
-    saveSessions(sessions)
-  }
-
-  // Resolve agent system prompt if this session has an agent
-  // Injection order: [userPrompt] \n\n [soul] \n\n [systemPrompt]
-  let systemPrompt: string | undefined
-  if (session.agentId) {
-    const agents = loadAgents()
-    const agent = agents[session.agentId]
-    if (agent?.systemPrompt || agent?.soul) {
-      const parts: string[] = []
-      // Load global user preferences
-      const { loadSettings: ls } = await import('@/lib/server/storage')
-      const settings = ls()
-      if (settings.userPrompt) parts.push(settings.userPrompt)
-      if (agent.soul) parts.push(agent.soul)
-      if (agent.systemPrompt) parts.push(agent.systemPrompt)
-      // Inject dynamic skills
-      if (agent.skillIds?.length) {
-        const allSkills = loadSkills()
-        for (const skillId of agent.skillIds) {
-          const skill = allSkills[skillId]
-          if (skill?.content) parts.push(`## Skill: ${skill.name}\n${skill.content}`)
-        }
-      }
-      systemPrompt = parts.join('\n\n')
-      log.info('chat', `Loaded agent prompt (${systemPrompt!.length} chars) for ${agent.name}`, { hasSoul: !!agent.soul, hasUserPrompt: !!settings.userPrompt })
-    } else {
-      log.warn('chat', `Agent ${session.agentId} found but no systemPrompt`)
-    }
-  }
-
-  log.info('chat', `Starting stream for ${id} (${providerType})`, { messageLen: message.length, hasSystemPrompt: !!systemPrompt })
-
-  // SSE streaming via ReadableStream
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
-    async start(controller) {
-      const rawWrite = (data: string) => {
-        controller.enqueue(encoder.encode(data))
+    start(controller) {
+      const writeEvent = (event: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
       }
 
-      // Collect tool events for persistence
-      const collectedToolEvents: MessageToolEvent[] = []
-      const write = (data: string) => {
-        rawWrite(data)
-        if (data.startsWith('data: ')) {
-          try {
-            const ev = JSON.parse(data.slice(6).trim())
-            if (ev.t === 'tool_call') {
-              collectedToolEvents.push({ name: ev.toolName || 'unknown', input: ev.toolInput || '' })
-            } else if (ev.t === 'tool_result') {
-              const last = [...collectedToolEvents].reverse().find(e => e.name === (ev.toolName || 'unknown') && !e.output)
-              if (last) {
-                last.output = ev.toolOutput
-                const out = (ev.toolOutput || '').trim()
-                if (/^(Error:|error:)/i.test(out) || out.includes('ECONNREFUSED') || out.includes('ETIMEDOUT') || out.includes('Error:')) {
-                  last.error = true
-                }
-              }
-            }
-          } catch { /* not JSON, ignore */ }
-        }
-      }
+      const run = enqueueSessionRun({
+        sessionId: id,
+        message,
+        imagePath,
+        imageUrl,
+        internal,
+        source: internal ? 'heartbeat' : 'chat',
+        mode: queueMode,
+        onEvent: (ev) => writeEvent(ev as unknown as Record<string, unknown>),
+      })
 
-      // Track this session as active with an abort controller for cancellation
-      const abortController = new AbortController()
-      active.set(id, { kill: () => abortController.abort() })
+      log.info('chat', `Enqueued session run ${run.runId}`, {
+        sessionId: id,
+        internal,
+        mode: queueMode,
+        position: run.position,
+        deduped: run.deduped || false,
+      })
 
-      try {
-        const cliProviders = ['claude-cli', 'codex-cli', 'opencode-cli']
-        const hasTools = session.tools?.length && !cliProviders.includes(session.provider)
+      writeEvent({
+        t: 'md',
+        text: JSON.stringify({
+          run: {
+            id: run.runId,
+            status: run.deduped ? 'deduped' : 'queued',
+            position: run.position,
+            internal,
+            mode: queueMode,
+          },
+        }),
+      })
 
-        const fullResponse = hasTools
-          ? await streamAgentChat({
-              session,
-              message,
-              imagePath,
-              apiKey,
-              systemPrompt,
-              write,
-              history: getSessionMessages(id),
-            })
-          : await provider.handler.streamChat({
-              session,
-              message,
-              imagePath,
-              apiKey,
-              systemPrompt,
-              write,
-              active,
-              loadHistory: getSessionMessages,
-            })
-
-        log.info('chat', `Stream complete for ${id}`, { responseLen: typeof fullResponse === 'string' ? fullResponse.length : 0 })
-
-        const trimmed = typeof fullResponse === 'string' ? fullResponse.trim() : ''
-        const shouldPersistAssistant = trimmed.length > 0
-          && (!isInternal || trimmed !== 'HEARTBEAT_OK')
-
-        if (shouldPersistAssistant) {
-          session.messages.push({
-            role: 'assistant',
-            text: trimmed,
-            time: Date.now(),
-            toolEvents: collectedToolEvents.length ? collectedToolEvents : undefined,
-          })
-          session.lastActiveAt = Date.now()
-          const s = loadSessions()
-          s[id] = session
-          saveSessions(s)
-        } else if (trimmed.length > 0) {
-          log.info('chat', `Skipped persistence for internal heartbeat ACK in ${id}`)
-        } else {
-          log.warn('chat', `Empty response from provider for ${id}`)
-        }
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err)
-        log.error('chat', `streamChat threw for ${id}`, errMsg)
-        write(`data: ${JSON.stringify({ t: 'err', text: errMsg })}\n\n`)
-      } finally {
-        active.delete(id)
-      }
-
-      write(`data: ${JSON.stringify({ t: 'done' })}\n\n`)
-      controller.close()
+      run.promise
+        .catch((err) => {
+          const msg = err?.message || String(err)
+          writeEvent({ t: 'err', text: msg })
+        })
+        .finally(() => {
+          writeEvent({ t: 'done' })
+          controller.close()
+        })
     },
   })
 

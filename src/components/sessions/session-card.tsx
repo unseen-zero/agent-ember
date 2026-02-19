@@ -32,6 +32,8 @@ interface Props {
 
 export function SessionCard({ session, active, onClick }: Props) {
   const removeSession = useAppStore((s) => s.removeSession)
+  const appSettings = useAppStore((s) => s.appSettings)
+  const agents = useAppStore((s) => s.agents)
 
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -46,6 +48,16 @@ export function SessionCard({ session, active, onClick }: Props) {
     ? (last.role === 'user' ? 'You: ' : '') + last.text.slice(0, 70)
     : 'No messages'
   const providerLabel = PROVIDER_LABELS[session.provider] || session.provider
+  const agent = session.agentId ? agents[session.agentId] : null
+  const loopIsOngoing = appSettings.loopMode === 'ongoing'
+  const intervalRaw = session.heartbeatIntervalSec ?? agent?.heartbeatIntervalSec ?? appSettings.heartbeatIntervalSec ?? 120
+  const intervalNum = typeof intervalRaw === 'number' ? intervalRaw : Number.parseInt(String(intervalRaw), 10)
+  const intervalEnabled = Number.isFinite(intervalNum) ? intervalNum > 0 : true
+  const heartbeatEnabled =
+    loopIsOngoing
+    && (session.tools?.length ?? 0) > 0
+    && intervalEnabled
+    && (session.heartbeatEnabled === true || (session.heartbeatEnabled !== false && agent?.heartbeatEnabled !== false))
 
   return (
     <div
@@ -63,6 +75,14 @@ export function SessionCard({ session, active, onClick }: Props) {
         {session.active && (
           <span className="inline-block w-[6px] h-[6px] rounded-full bg-success shrink-0"
             style={{ animation: 'pulse 2s ease-in-out infinite' }} />
+        )}
+        {heartbeatEnabled && (
+          <span
+            className="inline-flex items-center justify-center w-[10px] h-[10px] rounded-full bg-emerald-400/15 border border-emerald-400/30 shrink-0"
+            title="Heartbeat enabled"
+          >
+            <span className="w-[4px] h-[4px] rounded-full bg-emerald-400" />
+          </span>
         )}
         <span className="font-display text-[14px] font-600 truncate flex-1 tracking-[-0.01em]">{session.name}</span>
         {session.sessionType === 'orchestrated' && (

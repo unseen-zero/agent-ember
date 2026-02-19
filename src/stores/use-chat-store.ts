@@ -4,6 +4,7 @@ import { create } from 'zustand'
 import type { Message, DevServerStatus, SSEEvent } from '../types'
 import { streamChat } from '../lib/chat'
 import { speak } from '../lib/tts'
+import { getStoredAccessKey } from '../lib/api-client'
 import { useAppStore } from './use-app-store'
 
 interface PendingImage {
@@ -29,6 +30,7 @@ export interface UsageInfo {
 
 interface ChatState {
   streaming: boolean
+  streamingSessionId: string | null
   streamText: string
 
   messages: Message[]
@@ -58,6 +60,7 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   streaming: false,
+  streamingSessionId: null,
   streamText: '',
   messages: [],
   setMessages: (msgs) => set({ messages: msgs, toolEvents: [] }),
@@ -91,6 +94,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     set((s) => ({
       streaming: true,
+      streamingSessionId: sessionId,
       streamText: '',
       messages: [...s.messages, userMsg],
       pendingImage: null,
@@ -100,22 +104,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     let fullText = ''
     let toolCallCounter = 0
+    const shouldIgnoreTransientError = (msg: string) =>
+      /cancelled by steer mode|stopped by user/i.test(msg || '')
 
     await streamChat(sessionId, text, imagePath, imageUrl, (event: SSEEvent) => {
       if (event.t === 'd') {
         fullText += event.text || ''
         set({ streamText: fullText })
       } else if (event.t === 'md') {
-        // Check for usage metadata
+        // Parse metadata events (usage/run/queue). Ignore unknown keys.
         try {
           const meta = JSON.parse(event.text || '{}')
           if (meta.usage) {
             set({ lastUsage: meta.usage })
           }
         } catch {
-          // Not JSON usage metadata, treat as text
-          fullText = event.text || ''
-          set({ streamText: fullText })
+          // Ignore non-JSON metadata payloads.
         }
       } else if (event.t === 'r') {
         fullText = event.text || ''
@@ -148,8 +152,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return { toolEvents: events }
         })
       } else if (event.t === 'err') {
-        fullText += '\n[Error: ' + (event.text || 'Unknown') + ']'
-        set({ streamText: fullText })
+        const errText = event.text || 'Unknown'
+        if (!shouldIgnoreTransientError(errText)) {
+          fullText += '\n[Error: ' + errText + ']'
+          set({ streamText: fullText })
+        }
       } else if (event.t === 'done') {
         // done
       }
@@ -161,6 +168,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         role: 'assistant',
         text: fullText.trim(),
         time: Date.now(),
+        kind: 'chat',
         toolEvents: currentToolEvents.length ? currentToolEvents.map(e => ({
           name: e.name,
           input: e.input,
@@ -171,11 +179,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         messages: [...s.messages, assistantMsg],
         streaming: false,
+        streamingSessionId: null,
         streamText: '',
       }))
       if (get().ttsEnabled) speak(fullText)
     } else {
-      set({ streaming: false, streamText: '' })
+      set({ streaming: false, streamingSessionId: null, streamText: '' })
     }
 
     useAppStore.getState().loadSessions()
@@ -239,6 +248,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       role: 'assistant',
       text: trimmed,
       time: Date.now(),
+      kind: 'heartbeat',
       toolEvents: heartbeatToolEvents.length
         ? heartbeatToolEvents.map((e) => ({
             name: e.name,
@@ -257,10 +267,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const sessionId = useAppStore.getState().currentSessionId
     if (sessionId) {
       try {
-        await fetch(`/api/sessions/${sessionId}/stop`, { method: 'POST' })
+        const key = getStoredAccessKey()
+        await fetch(`/api/sessions/${sessionId}/stop`, {
+          method: 'POST',
+          headers: key ? { 'X-Access-Key': key } : undefined,
+        })
       } catch {
         // ignore
       }
     }
+    set({ streaming: false, streamingSessionId: null, streamText: '' })
   },
 }))

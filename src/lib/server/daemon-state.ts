@@ -3,6 +3,7 @@ import { processNext } from './queue'
 import { startScheduler, stopScheduler } from './scheduler'
 import { sweepOrphanedBrowsers, getActiveBrowserCount } from './session-tools'
 import { autoStartConnectors, stopAllConnectors } from './connectors/manager'
+import { startHeartbeatService, stopHeartbeatService, getHeartbeatServiceStatus } from './heartbeat-service'
 
 const QUEUE_CHECK_INTERVAL = 30_000 // 30 seconds
 const BROWSER_SWEEP_INTERVAL = 60_000 // 60 seconds
@@ -25,11 +26,12 @@ const ds: {
 export function startDaemon() {
   if (ds.running) return
   ds.running = true
-  console.log('[daemon] Starting daemon (scheduler + queue processor)')
+  console.log('[daemon] Starting daemon (scheduler + queue processor + heartbeat)')
 
   startScheduler()
   startQueueProcessor()
   startBrowserSweep()
+  startHeartbeatService()
 
   // Auto-start enabled connectors
   autoStartConnectors().catch((err) => {
@@ -45,6 +47,7 @@ export function stopDaemon() {
   stopScheduler()
   stopQueueProcessor()
   stopBrowserSweep()
+  stopHeartbeatService()
   stopAllConnectors().catch(() => {})
 }
 
@@ -109,6 +112,7 @@ export function getDaemonStatus() {
     queueLength: queue.length,
     lastProcessed: ds.lastProcessedAt,
     nextScheduled,
+    heartbeat: getHeartbeatServiceStatus(),
   }
 }
 
