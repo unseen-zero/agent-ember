@@ -131,6 +131,39 @@ Bridge any agent to a chat platform:
 | Telegram | grammy | Bot token from @BotFather |
 | WhatsApp | baileys | QR code pairing (shown in browser) |
 
+## Deploy to a VPS
+
+### Direct (pm2 + Caddy)
+
+```bash
+# On your VPS
+git clone https://github.com/swarmclawai/swarmclaw.git
+cd swarmclaw
+npm install
+npm run build
+
+# Run with pm2
+sudo npm install -g pm2
+pm2 start npm --name swarmclaw -- start
+pm2 save && pm2 startup
+```
+
+Point a reverse proxy (Caddy or nginx) at `localhost:3456` for TLS. See the [full deployment guide](https://swarmclaw.ai/docs/deployment).
+
+### Docker
+
+```bash
+git clone https://github.com/swarmclawai/swarmclaw.git
+cd swarmclaw
+docker compose up -d
+```
+
+Data is persisted in `data/` and `.env.local` via volume mounts. Updates: `git pull && docker compose up -d --build`.
+
+### Updating
+
+SwarmClaw has a built-in update checker — a banner appears in the sidebar when new commits are available, with a one-click update button. Your data in `data/` and `.env.local` is never touched by updates.
+
 ## Development
 
 ```bash

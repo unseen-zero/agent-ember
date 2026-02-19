@@ -1,0 +1,9 @@
+services:
+  swarmclaw:
+    build: .
+    ports:
+      - "3456:3456"
+    volumes:
+      - ./data:/app/data
+      - ./.env.local:/app/.env.local
+    restart: unless-stopped

@@ -10,6 +10,7 @@ function getGitSha(): string {
 }
 
 const nextConfig: NextConfig = {
+  output: 'standalone',
   env: {
     NEXT_PUBLIC_GIT_SHA: getGitSha(),
   },
