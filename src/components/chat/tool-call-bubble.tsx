@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import type { ToolEvent } from '@/stores/use-chat-store'
 
 const TOOL_COLORS: Record<string, string> = {
@@ -8,76 +8,395 @@ const TOOL_COLORS: Record<string, string> = {
   read_file: '#10B981',
   write_file: '#10B981',
   list_files: '#10B981',
+  edit_file: '#10B981',
+  send_file: '#10B981',
+  web_search: '#3B82F6',
+  web_fetch: '#3B82F6',
   delegate_to_claude_code: '#6366F1',
+  manage_tasks: '#EC4899',
+  manage_schedules: '#EC4899',
+  manage_agents: '#EC4899',
+  manage_skills: '#EC4899',
+  manage_connectors: '#EC4899',
+  manage_sessions: '#EC4899',
+  memory: '#A855F7',
+  browser: '#3B82F6',
 }
 
-const TOOL_LABELS: Record<string, string> = {
+/** Sub-labels for browser actions shown after the main "Browser" label */
+const BROWSER_ACTION_LABELS: Record<string, string> = {
+  navigate: 'Navigate',
+  screenshot: 'Screenshot',
+  snapshot: 'Snapshot',
+  click: 'Click',
+  type: 'Type',
+  press_key: 'Key Press',
+  select: 'Select',
+  evaluate: 'Run JS',
+  pdf: 'Save PDF',
+  upload: 'Upload',
+  wait: 'Wait',
+}
+
+export const TOOL_LABELS: Record<string, string> = {
   execute_command: 'Shell',
   read_file: 'Read File',
   write_file: 'Write File',
   list_files: 'List Files',
+  edit_file: 'Edit File',
+  send_file: 'Send File',
+  web_search: 'Web Search',
+  web_fetch: 'Web Fetch',
   delegate_to_claude_code: 'Claude Code',
+  manage_tasks: 'Tasks',
+  manage_schedules: 'Schedules',
+  manage_agents: 'Agents',
+  manage_skills: 'Skills',
+  manage_connectors: 'Connectors',
+  manage_sessions: 'Sessions',
+  memory: 'Memory',
+  browser: 'Browser',
+}
+
+export const TOOL_DESCRIPTIONS: Record<string, string> = {
+  execute_command: 'Run shell commands in the working directory',
+  read_file: 'Read file contents from disk',
+  write_file: 'Write or create files on disk',
+  list_files: 'List files and directories',
+  edit_file: 'Edit existing files with find-and-replace',
+  send_file: 'Send files to the user (images, PDFs, videos, documents, etc.)',
+  web_search: 'Search the web for information',
+  web_fetch: 'Fetch and read web page content',
+  delegate_to_claude_code: 'Delegate complex coding tasks to Claude Code',
+  manage_tasks: 'Create, update, and manage tasks on the board',
+  manage_schedules: 'Create and manage cron schedules',
+  manage_agents: 'Create and configure other agents',
+  manage_skills: 'Create and manage agent skills',
+  manage_connectors: 'Manage chat platform connectors (Slack, Discord, etc.)',
+  manage_sessions: 'Create and manage chat sessions',
+  memory: 'Store and recall information across conversations',
+  browser: 'Browse the web, take screenshots, and interact with pages',
+}
+
+/**
+ * Recursively parse stringified JSON values so nested escaped JSON
+ * like `"{\"title\": \"Test\"}"` becomes a proper object.
+ */
+function deepParseJson(value: unknown): unknown {
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      if (typeof parsed === 'object' && parsed !== null) {
+        return deepParseJson(parsed)
+      }
+      return parsed
+    } catch {
+      return value
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.map(deepParseJson)
+  }
+  if (typeof value === 'object' && value !== null) {
+    const result: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) {
+      result[k] = deepParseJson(v)
+    }
+    return result
+  }
+  return value
+}
+
+/** Pretty-print JSON, recursively parsing stringified nested values */
+function formatJson(raw: string): string {
+  try {
+    const parsed = deepParseJson(JSON.parse(raw))
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    return raw
+  }
+}
+
+/** Extract a human-readable preview from tool input */
+function getInputPreview(name: string, input: string): string {
+  try {
+    let parsed = JSON.parse(input)
+    // Unwrap LangChain's { input: ... } wrapper
+    if (parsed.input && Object.keys(parsed).length === 1) {
+      const inner = parsed.input
+      if (typeof inner === 'string') {
+        try { parsed = JSON.parse(inner) } catch { parsed = inner }
+      } else if (typeof inner === 'object' && inner !== null) {
+        parsed = inner
+      }
+    }
+
+    // Consolidated browser tool — show action + relevant detail
+    if (name === 'browser') {
+      const act = parsed.action || ''
+      if (act === 'navigate') return parsed.url || ''
+      if (act === 'click') return parsed.element || (parsed.ref ? `element #${parsed.ref}` : '')
+      if (act === 'type') return parsed.text ? `"${parsed.text.slice(0, 50)}"` : ''
+      if (act === 'press_key') return parsed.key || ''
+      if (act === 'select') return parsed.option || ''
+      if (act === 'evaluate') return parsed.expression?.slice(0, 60) || ''
+      if (act === 'wait') return parsed.text ? `for "${parsed.text}"` : `${parsed.timeout || 30000}ms`
+      if (act === 'upload') return parsed.paths?.join(', ')?.slice(0, 60) || ''
+      return ''
+    }
+    if (name === 'send_file') return parsed.filePath || ''
+
+    if (parsed.command) return parsed.command
+    if (parsed.filePath) return parsed.filePath
+    if (parsed.dirPath) return parsed.dirPath
+    if (parsed.query) return parsed.query
+    if (parsed.url) return parsed.url
+    if (parsed.task) return parsed.task.slice(0, 80)
+    if (parsed.action) {
+      const detail = parsed.data?.title || parsed.data?.name || parsed.data?.content?.slice(0, 40) || parsed.id || ''
+      return detail ? `${parsed.action}: ${detail}` : parsed.action
+    }
+    const keys = Object.keys(parsed)
+    if (keys.length === 1) {
+      const val = parsed[keys[0]]
+      const str = typeof val === 'string' ? val : JSON.stringify(val)
+      return `${keys[0]}: ${str.slice(0, 60)}`
+    }
+    if (keys.length <= 3) return keys.join(', ')
+    return `${keys.slice(0, 2).join(', ')} +${keys.length - 2} more`
+  } catch {
+    return input.slice(0, 80)
+  }
+}
+
+/** Extract embedded images, videos, PDFs, and file links from tool output */
+function extractMedia(output: string): { images: string[]; videos: string[]; pdfs: { name: string; url: string }[]; files: { name: string; url: string }[]; cleanText: string } {
+  const images: string[] = []
+  const videos: string[] = []
+  const pdfs: { name: string; url: string }[] = []
+  const files: { name: string; url: string }[] = []
+
+  // Extract ![alt](/api/uploads/filename) — detect videos vs images by extension
+  let cleanText = output.replace(/!\[([^\]]*)\]\(\/api\/uploads\/([^)]+)\)/g, (_match, _alt, filename) => {
+    const url = `/api/uploads/${filename}`
+    if (/\.(mp4|webm|mov|avi)$/i.test(filename)) {
+      videos.push(url)
+    } else {
+      images.push(url)
+    }
+    return ''
+  })
+
+  // Extract [label](/api/uploads/filename) — separate PDFs for inline preview
+  cleanText = cleanText.replace(/\[([^\]]*)\]\(\/api\/uploads\/([^)]+)\)/g, (_match, label, filename) => {
+    const url = `/api/uploads/${filename}`
+    if (/\.pdf$/i.test(filename)) {
+      pdfs.push({ name: label || filename, url })
+    } else {
+      files.push({ name: label || filename, url })
+    }
+    return ''
+  })
+
+  // Clean up leftover whitespace
+  cleanText = cleanText.replace(/\n{3,}/g, '\n\n').trim()
+
+  return { images, videos, pdfs, files, cleanText }
 }
 
 export function ToolCallBubble({ event }: { event: ToolEvent }) {
   const [expanded, setExpanded] = useState(false)
-  const color = TOOL_COLORS[event.name] || '#6366F1'
-  const label = TOOL_LABELS[event.name] || event.name
+  const [imgExpanded, setImgExpanded] = useState(false)
+  const isError = event.status === 'error'
+  const color = isError ? '#F43F5E' : (TOOL_COLORS[event.name] || '#6366F1')
   const isRunning = event.status === 'running'
 
-  let inputPreview = ''
-  try {
-    const parsed = JSON.parse(event.input)
-    inputPreview = parsed.command || parsed.filePath || parsed.dirPath || parsed.task?.slice(0, 60) || event.input.slice(0, 60)
-  } catch {
-    inputPreview = event.input.slice(0, 60)
-  }
+  // For browser tool, extract the action to show a more specific label
+  const label = useMemo(() => {
+    if (event.name === 'browser') {
+      try {
+        let parsed = JSON.parse(event.input)
+        // Unwrap LangChain {input: "..."} wrapper — inner value is a stringified JSON
+        if (parsed?.input && Object.keys(parsed).length === 1) {
+          const inner = typeof parsed.input === 'string' ? JSON.parse(parsed.input) : parsed.input
+          if (typeof inner === 'object' && inner !== null) parsed = inner
+        }
+        const action = parsed?.action || ''
+        const sub = BROWSER_ACTION_LABELS[action]
+        return sub ? `Browser · ${sub}` : 'Browser'
+      } catch { return 'Browser' }
+    }
+    return TOOL_LABELS[event.name] || event.name.replace(/_/g, ' ')
+  }, [event.name, event.input])
+
+  const inputPreview = useMemo(() => getInputPreview(event.name, event.input), [event.name, event.input])
+  const formattedInput = useMemo(() => formatJson(event.input), [event.input])
+
+  const media = useMemo(() => {
+    if (!event.output) return { images: [], videos: [], pdfs: [], files: [], cleanText: '' }
+    return extractMedia(event.output)
+  }, [event.output])
+
+  const formattedCleanOutput = useMemo(() => {
+    if (!media.cleanText) return ''
+    return formatJson(media.cleanText)
+  }, [media.cleanText])
+
+  const hasMedia = media.images.length > 0 || media.videos.length > 0 || media.pdfs.length > 0 || media.files.length > 0
 
   return (
-    <button
-      onClick={() => setExpanded(!expanded)}
-      className="w-full text-left rounded-[12px] border bg-surface/80 backdrop-blur-sm transition-all duration-200 hover:bg-surface-2 cursor-pointer"
-      style={{ borderLeft: `3px solid ${color}`, borderColor: `${color}33` }}
-    >
-      <div className="flex items-center gap-2.5 px-3.5 py-2.5">
-        {isRunning ? (
-          <span className="w-3.5 h-3.5 shrink-0 rounded-full border-2 border-current animate-spin" style={{ color, borderTopColor: 'transparent' }} />
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        )}
-        <span className="text-[12px] font-700 uppercase tracking-wider shrink-0" style={{ color }}>
-          {label}
-        </span>
-        <span className="text-[12px] text-text-3 font-mono truncate flex-1">
-          {inputPreview}
-        </span>
-        <svg
-          width="12" height="12" viewBox="0 0 24 24" fill="none"
-          stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-          className={`shrink-0 text-text-3/40 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
-        >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-      </div>
-
-      {expanded && (
-        <div className="px-3.5 pb-3 space-y-2">
-          <div className="text-[11px] text-text-3/60 uppercase tracking-wider font-600">Input</div>
-          <pre className="text-[12px] text-text-2 font-mono whitespace-pre-wrap break-all bg-bg/50 rounded-[8px] px-3 py-2 max-h-[120px] overflow-y-auto">
-            {event.input}
-          </pre>
-          {event.output && (
-            <>
-              <div className="text-[11px] text-text-3/60 uppercase tracking-wider font-600 mt-2">Output</div>
-              <pre className="text-[12px] text-text-2 font-mono whitespace-pre-wrap break-all bg-bg/50 rounded-[8px] px-3 py-2 max-h-[200px] overflow-y-auto">
-                {event.output}
-              </pre>
-            </>
+    <div className="w-full text-left">
+      <button
+        onClick={() => isError && setExpanded(!expanded)}
+        className={`w-full text-left rounded-[12px] border bg-surface/80 backdrop-blur-sm transition-all duration-200 ${isError ? 'hover:bg-surface-2 cursor-pointer' : ''}`}
+        style={{ borderLeft: `3px solid ${color}`, borderColor: `${color}33` }}
+      >
+        <div className="flex items-center gap-2.5 px-3.5 py-2.5">
+          {isRunning ? (
+            <span className="w-3.5 h-3.5 shrink-0 rounded-full border-2 border-current animate-spin" style={{ color, borderTopColor: 'transparent' }} />
+          ) : isError ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          )}
+          <span className="text-[12px] font-700 uppercase tracking-wider shrink-0" style={{ color }}>
+            {label}
+          </span>
+          <span className="text-[12px] text-text-2 font-mono truncate flex-1">
+            {inputPreview}
+          </span>
+          {hasMedia && !expanded && (
+            <span className="text-[10px] text-text-3/50 font-500 shrink-0">
+              {media.images.length > 0 && `${media.images.length} image${media.images.length > 1 ? 's' : ''}`}
+              {media.videos.length > 0 && `${(media.images.length > 0) ? ' · ' : ''}${media.videos.length} video${media.videos.length > 1 ? 's' : ''}`}
+              {media.pdfs.length > 0 && `${(media.images.length > 0 || media.videos.length > 0) ? ' · ' : ''}${media.pdfs.length} PDF${media.pdfs.length > 1 ? 's' : ''}`}
+              {media.files.length > 0 && `${(media.images.length > 0 || media.videos.length > 0 || media.pdfs.length > 0) ? ' · ' : ''}${media.files.length} file${media.files.length > 1 ? 's' : ''}`}
+            </span>
+          )}
+          {isError && (
+            <svg
+              width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+              className={`shrink-0 text-text-3/40 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
           )}
         </div>
+
+        {expanded && isError && (
+          <div className="px-3.5 pb-3 space-y-2" onClick={(e) => e.stopPropagation()}>
+            <div className="text-[11px] text-text-3/60 uppercase tracking-wider font-600">Input</div>
+            <pre className="text-[12px] text-text-2 font-mono whitespace-pre-wrap break-all bg-bg/50 rounded-[8px] px-3 py-2 max-h-[200px] overflow-y-auto">
+              {formattedInput}
+            </pre>
+            {event.output && (
+              <>
+                <div className="text-[11px] text-text-3/60 uppercase tracking-wider font-600 mt-2">Error</div>
+                {formattedCleanOutput && (
+                  <pre className="text-[12px] text-text-2 font-mono whitespace-pre-wrap break-all bg-bg/50 rounded-[8px] px-3 py-2 max-h-[300px] overflow-y-auto">
+                    {formattedCleanOutput}
+                  </pre>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </button>
+
+      {/* Render images below the tool call bubble (always visible when present) */}
+      {media.images.length > 0 && (
+        <div className="mt-2 flex flex-col gap-2">
+          {media.images.map((src, i) => (
+            <div key={i} className="relative group/img">
+              <img
+                src={src}
+                alt={`Screenshot ${i + 1}`}
+                className={`rounded-[10px] border border-white/10 cursor-pointer transition-all duration-200 hover:border-white/25 ${imgExpanded ? 'max-w-full' : 'max-w-[400px]'}`}
+                onClick={(e) => { e.stopPropagation(); setImgExpanded(!imgExpanded) }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+              />
+              <a
+                href={src}
+                download
+                onClick={(e) => e.stopPropagation()}
+                className="absolute top-2 right-2 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/60 backdrop-blur-sm rounded-[8px] p-1.5 hover:bg-black/80"
+                title="Download"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              </a>
+            </div>
+          ))}
+        </div>
       )}
-    </button>
+
+      {/* Render videos */}
+      {media.videos.length > 0 && (
+        <div className="mt-2 flex flex-col gap-2">
+          {media.videos.map((src, i) => (
+            <video key={i} src={src} controls playsInline className="max-w-full rounded-[10px] border border-white/10" />
+          ))}
+        </div>
+      )}
+
+      {/* Render PDFs inline with iframe preview + download */}
+      {media.pdfs.length > 0 && (
+        <div className="mt-2 flex flex-col gap-2">
+          {media.pdfs.map((file, i) => (
+            <div key={i} className="rounded-[10px] border border-white/10 overflow-hidden">
+              <iframe src={file.url} className="w-full h-[400px] bg-white" title={file.name} />
+              <a
+                href={file.url}
+                download
+                onClick={(e) => e.stopPropagation()}
+                className="flex items-center gap-2 px-3 py-2 bg-surface/80 border-t border-white/10 text-[12px] text-text-2 hover:text-text no-underline transition-colors"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                {file.name}
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Render other file download links */}
+      {media.files.length > 0 && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          {media.files.map((file, i) => (
+            <a
+              key={i}
+              href={file.url}
+              download
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center gap-2 px-3 py-2 rounded-[10px] border border-white/10 bg-surface/60 hover:bg-surface-2 transition-colors text-[13px] text-text-2 hover:text-text no-underline"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              {file.name}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="ml-auto opacity-50">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }

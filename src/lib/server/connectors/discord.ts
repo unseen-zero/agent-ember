@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events } from 'discord.js'
+import { Client, GatewayIntentBits, Events, Partials } from 'discord.js'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
 
@@ -11,6 +11,7 @@ const discord: PlatformConnector = {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
+      partials: [Partials.Channel], // Required to receive DM events
     })
 
     // Optional: restrict to specific channels
@@ -19,6 +20,7 @@ const discord: PlatformConnector = {
       : null
 
     client.on(Events.MessageCreate, async (message) => {
+      console.log(`[discord] Message from ${message.author.username} in ${message.channel.type === 1 ? 'DM' : '#' + ('name' in message.channel ? (message.channel as any).name : message.channelId)}: ${message.content.slice(0, 80)}`)
       // Ignore bot messages
       if (message.author.bot) return
 
@@ -42,7 +44,7 @@ const discord: PlatformConnector = {
 
         // Discord has a 2000 char limit per message
         if (response.length <= 2000) {
-          await message.reply(response)
+          await message.channel.send(response)
         } else {
           // Split into chunks
           const chunks = response.match(/[\s\S]{1,1990}/g) || [response]

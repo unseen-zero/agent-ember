@@ -19,6 +19,7 @@ interface AppState {
   loadSessions: () => Promise<void>
   setCurrentSession: (id: string | null) => void
   removeSession: (id: string) => void
+  clearSessions: (ids: string[]) => Promise<void>
   updateSessionInStore: (session: Session) => void
 
   sidebarOpen: boolean
@@ -63,6 +64,12 @@ interface AppState {
 
   memorySheetOpen: boolean
   setMemorySheetOpen: (open: boolean) => void
+  selectedMemoryId: string | null
+  setSelectedMemoryId: (id: string | null) => void
+  memoryRefreshKey: number
+  triggerMemoryRefresh: () => void
+  memoryAgentFilter: string | null
+  setMemoryAgentFilter: (agentId: string | null) => void
 
   appSettings: AppSettings
   loadSettings: () => Promise<void>
@@ -137,6 +144,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sessions = { ...get().sessions }
     delete sessions[id]
     set({ sessions, currentSessionId: get().currentSessionId === id ? null : get().currentSessionId })
+  },
+  clearSessions: async (ids) => {
+    if (!ids.length) return
+    await api('DELETE', '/sessions', { ids })
+    const sessions = { ...get().sessions }
+    for (const id of ids) delete sessions[id]
+    set({ sessions, currentSessionId: ids.includes(get().currentSessionId!) ? null : get().currentSessionId })
   },
   updateSessionInStore: (session) => {
     set({ sessions: { ...get().sessions, [session.id]: session } })
@@ -226,6 +240,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   memorySheetOpen: false,
   setMemorySheetOpen: (open) => set({ memorySheetOpen: open }),
+  selectedMemoryId: null,
+  setSelectedMemoryId: (id) => set({ selectedMemoryId: id }),
+  memoryRefreshKey: 0,
+  triggerMemoryRefresh: () => set((s) => ({ memoryRefreshKey: s.memoryRefreshKey + 1 })),
+  memoryAgentFilter: null,
+  setMemoryAgentFilter: (agentId) => set({ memoryAgentFilter: agentId }),
 
   appSettings: {},
   loadSettings: async () => {

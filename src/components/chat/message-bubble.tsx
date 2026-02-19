@@ -8,6 +8,7 @@ import type { Message } from '@/types'
 import { useAppStore } from '@/stores/use-app-store'
 import { AiAvatar } from '@/components/shared/avatar'
 import { CodeBlock } from './code-block'
+import { ToolCallBubble } from './tool-call-bubble'
 
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -46,16 +47,38 @@ export const MessageBubble = memo(function MessageBubble({ message, assistantNam
         </span>
       </div>
 
+      {/* Tool call events (assistant messages only) */}
+      {!isUser && message.toolEvents && message.toolEvents.length > 0 && (
+        <div className="max-w-[85%] md:max-w-[72%] flex flex-col gap-2 mb-2">
+          {message.toolEvents.map((event, i) => (
+            <ToolCallBubble key={`${message.time}-tool-${i}`} event={{ id: `${message.time}-${i}`, name: event.name, input: event.input, output: event.output, status: event.error ? 'error' : 'done' }} />
+          ))}
+        </div>
+      )}
+
       {/* Message bubble */}
       <div className={`max-w-[85%] md:max-w-[72%] ${isUser ? 'bubble-user px-5 py-3.5' : 'bubble-ai px-5 py-3.5'}`}>
-        {(message.imagePath || message.imageUrl) && (
-          <img
-            src={message.imageUrl || `/api/uploads/${message.imagePath?.split('/').pop()}`}
-            alt="Attached"
-            className="max-w-[240px] rounded-[12px] mb-3 border border-white/10"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-          />
-        )}
+        {(message.imagePath || message.imageUrl) && (() => {
+          const url = message.imageUrl || `/api/uploads/${message.imagePath?.split('/').pop()}`
+          const filename = message.imagePath?.split('/').pop()?.replace(/^[a-f0-9]+-/, '') || 'file'
+          const isImage = /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(filename)
+          if (isImage) {
+            return (
+              <img src={url} alt="Attached" className="max-w-[240px] rounded-[12px] mb-3 border border-white/10"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+            )
+          }
+          return (
+            <a href={url} download={filename}
+              className="flex items-center gap-3 px-4 py-3 mb-3 rounded-[12px] border border-white/10 bg-white/[0.03] hover:bg-white/[0.06] transition-colors no-underline">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="text-text-3 shrink-0">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              <span className="text-[13px] text-text-2 font-500 truncate">{filename}</span>
+            </a>
+          )
+        })()}
 
         <div className={`msg-content text-[15px] break-words ${isUser ? 'leading-[1.6] text-white/95' : 'leading-[1.7] text-text'}`}>
           <ReactMarkdown
@@ -71,6 +94,52 @@ export const MessageBubble = memo(function MessageBubble({ message, assistantNam
                   return <CodeBlock className={className}>{children}</CodeBlock>
                 }
                 return <code className={className}>{children}</code>
+              },
+              img({ src, alt }) {
+                if (!src || typeof src !== 'string') return null
+                const isVideo = /\.(mp4|webm|mov|avi)$/i.test(src)
+                if (isVideo) {
+                  return (
+                    <video src={src} controls className="max-w-full rounded-[10px] border border-white/10 my-2" />
+                  )
+                }
+                return (
+                  <a href={src} download target="_blank" rel="noopener noreferrer" className="block my-2">
+                    <img src={src} alt={alt || 'File'} className="max-w-full rounded-[10px] border border-white/10 hover:border-white/25 transition-colors cursor-pointer" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                  </a>
+                )
+              },
+              a({ href, children }) {
+                if (!href) return <>{children}</>
+                const isUpload = href.startsWith('/api/uploads/')
+                if (isUpload) {
+                  return (
+                    <a href={href} download className="inline-flex items-center gap-1.5 text-sky-400 hover:text-sky-300 underline">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      {children}
+                    </a>
+                  )
+                }
+                // YouTube embed
+                const ytMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/)
+                if (ytMatch) {
+                  return (
+                    <div className="my-2">
+                      <iframe
+                        src={`https://www.youtube-nocookie.com/embed/${ytMatch[1]}`}
+                        className="w-full aspect-video rounded-[10px] border border-white/10"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                        title="YouTube video"
+                      />
+                    </div>
+                  )
+                }
+                return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
               },
             }}
           >

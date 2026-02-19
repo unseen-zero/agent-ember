@@ -48,6 +48,12 @@ export const fetchDirs = async () => {
 export const devServer = (id: string, action: 'start' | 'stop' | 'status') =>
   api<DevServerStatus>('POST', `/sessions/${id}/devserver`, { action })
 
+export const checkBrowser = (id: string) =>
+  api<{ active: boolean }>('GET', `/sessions/${id}/browser`)
+
+export const stopBrowser = (id: string) =>
+  api<string>('DELETE', `/sessions/${id}/browser`)
+
 export const deploy = (id: string, message: string) =>
   api<DeployResult>('POST', `/sessions/${id}/deploy`, { message })
 

@@ -6,6 +6,7 @@ import { useAppStore } from '@/stores/use-app-store'
 import { useChatStore } from '@/stores/use-chat-store'
 import { IconButton } from '@/components/shared/icon-button'
 import { UsageBadge } from '@/components/shared/usage-badge'
+import { ChatToolToggles } from './chat-tool-toggles'
 
 function shortPath(p: string): string {
   return (p || '').replace(/^\/Users\/\w+/, '~')
@@ -25,9 +26,11 @@ interface Props {
   onMenuToggle: () => void
   onBack?: () => void
   mobile?: boolean
+  browserActive?: boolean
+  onStopBrowser?: () => void
 }
 
-export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, mobile }: Props) {
+export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, mobile, browserActive, onStopBrowser }: Props) {
   const ttsEnabled = useChatStore((s) => s.ttsEnabled)
   const toggleTts = useChatStore((s) => s.toggleTts)
   const debugOpen = useChatStore((s) => s.debugOpen)
@@ -36,6 +39,8 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
   const agents = useAppStore((s) => s.agents)
   const tasks = useAppStore((s) => s.tasks)
   const setActiveView = useAppStore((s) => s.setActiveView)
+  const setMemoryAgentFilter = useAppStore((s) => s.setMemoryAgentFilter)
+  const setSidebarOpen = useAppStore((s) => s.setSidebarOpen)
   const providerLabel = PROVIDER_LABELS[session.provider] || session.provider
   const agent = session.agentId ? agents[session.agentId] : null
   const modelName = session.model || agent?.model || ''
@@ -46,7 +51,8 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
     return Object.values(tasks).find((t) => t.sessionId === session.id)
   }, [tasks, session.id])
 
-  const isCliSession = session.provider === 'claude-cli'
+  const cliProviders = ['claude-cli', 'codex-cli', 'opencode-cli']
+  const isCliSession = cliProviders.includes(session.provider)
   const cliSessionId = isCliSession ? session.claudeSessionId : null
 
   const handleCopySessionId = () => {
@@ -69,7 +75,7 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
         )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2.5">
-            <span className="font-display text-[16px] font-600 block truncate tracking-[-0.02em]">{session.name}</span>
+            <span className="font-display text-[16px] font-600 block truncate tracking-[-0.02em]">{session.name === '__main__' ? 'Main Chat' : session.name}</span>
             {session.provider && session.provider !== 'claude-cli' && (
               <span className="shrink-0 px-2.5 py-0.5 rounded-[7px] bg-accent-soft text-accent-bright text-[10px] font-700 uppercase tracking-wider">
                 {providerLabel}
@@ -136,9 +142,29 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
         </div>
       </div>
 
-      {/* Sub-bar: task link + CLI session ID */}
-      {(linkedTask || cliSessionId) && (
+      {/* Sub-bar: tools toggle + agent memories + task link + CLI session ID + browser */}
+      {(agent || linkedTask || cliSessionId || browserActive || session.tools?.length) && (
         <div className="flex items-center gap-3 px-5 pb-2.5 -mt-1">
+          {!isCliSession && (agent?.tools?.length ?? 0) > 0 && (
+            <ChatToolToggles session={session} />
+          )}
+          {agent && session.tools?.includes('memory') && (
+            <button
+              onClick={() => {
+                setMemoryAgentFilter(session.agentId!)
+                setActiveView('memory')
+                setSidebarOpen(true)
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-accent-soft/50 hover:bg-accent-soft transition-colors cursor-pointer"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-accent-bright/60">
+                <ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" /><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+              </svg>
+              <span className="text-[11px] font-600 text-accent-bright/60">
+                {agent.name} Memories
+              </span>
+            </button>
+          )}
           {linkedTask && (
             <button
               onClick={() => setActiveView('tasks')}
@@ -173,6 +199,27 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                 </svg>
               )}
+            </button>
+          )}
+          {browserActive && (
+            <button
+              onClick={onStopBrowser}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-[#3B82F6]/10 hover:bg-[#F43F5E]/15 transition-colors cursor-pointer group"
+              title="Stop browser session"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-[#3B82F6] group-hover:text-[#F43F5E]">
+                <rect x="3" y="3" width="18" height="14" rx="2" />
+                <path d="M3 9h18" />
+                <circle cx="7" cy="6" r="0.5" fill="currentColor" />
+                <circle cx="10" cy="6" r="0.5" fill="currentColor" />
+              </svg>
+              <span className="text-[11px] font-600 text-[#3B82F6] group-hover:text-[#F43F5E]">
+                Browser Active
+              </span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-text-3/30 group-hover:text-[#F43F5E] shrink-0">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
             </button>
           )}
         </div>

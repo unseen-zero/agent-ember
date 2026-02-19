@@ -3,7 +3,7 @@
 import { useEffect, useCallback, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
 import { useChatStore } from '@/stores/use-chat-store'
-import { fetchMessages, clearMessages, deleteSession, devServer, stopSession } from '@/lib/sessions'
+import { fetchMessages, clearMessages, deleteSession, devServer, stopSession, checkBrowser, stopBrowser } from '@/lib/sessions'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { ChatHeader } from './chat-header'
 import { DevServerBar } from './dev-server-bar'
@@ -14,10 +14,10 @@ import { Dropdown, DropdownItem, DropdownSep } from '@/components/shared/dropdow
 import { ConfirmDialog } from '@/components/shared/confirm-dialog'
 
 const PROMPT_SUGGESTIONS = [
-  { text: 'Help me debug an error in my project', icon: 'bug', gradient: 'from-[#6366F1]/10 to-[#818CF8]/5' },
-  { text: 'Generate a new React component', icon: 'code', gradient: 'from-[#EC4899]/10 to-[#F472B6]/5' },
-  { text: 'Explain how this codebase works', icon: 'book', gradient: 'from-[#34D399]/10 to-[#6EE7B7]/5' },
-  { text: 'Write tests for a function', icon: 'check', gradient: 'from-[#F59E0B]/10 to-[#FBBF24]/5' },
+  { text: 'List all my sessions and agents', icon: 'book', gradient: 'from-[#6366F1]/10 to-[#818CF8]/5' },
+  { text: 'Help me set up a new connector', icon: 'link', gradient: 'from-[#EC4899]/10 to-[#F472B6]/5' },
+  { text: 'Create a new agent for me', icon: 'bot', gradient: 'from-[#34D399]/10 to-[#6EE7B7]/5' },
+  { text: 'Schedule a recurring task', icon: 'check', gradient: 'from-[#F59E0B]/10 to-[#FBBF24]/5' },
 ]
 
 export function ChatArea() {
@@ -30,39 +30,106 @@ export function ChatArea() {
   const setCurrentSession = useAppStore((s) => s.setCurrentSession)
   const removeSessionFromStore = useAppStore((s) => s.removeSession)
   const loadSessions = useAppStore((s) => s.loadSessions)
-  const { messages, setMessages, streaming, sendMessage, stopStreaming, devServer: devServerStatus, setDevServer, debugOpen, setDebugOpen } = useChatStore()
+  const appSettings = useAppStore((s) => s.appSettings)
+  const { messages, setMessages, streaming, sendMessage, sendHeartbeat, stopStreaming, devServer: devServerStatus, setDevServer, debugOpen, setDebugOpen } = useChatStore()
   const isDesktop = useMediaQuery('(min-width: 768px)')
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
+  const [browserActive, setBrowserActive] = useState(false)
 
   useEffect(() => {
     if (!sessionId) return
-    // Immediately clear stale messages/streaming from the previous session
+    // Clear stale state from the previous session
     setMessages([])
-    useChatStore.setState({ streaming: false, streamText: '' })
+    useChatStore.setState({ streaming: false, streamText: '', toolEvents: [] })
     fetchMessages(sessionId).then(setMessages).catch(() => {
       setMessages(session?.messages || [])
     })
+    // If server reports session is still active, show streaming state
+    if (session?.active) {
+      useChatStore.setState({ streaming: true, streamText: '' })
+    }
     devServer(sessionId, 'status').then((r) => {
       setDevServer(r.running ? r : null)
     }).catch(() => setDevServer(null))
+    // Check browser status
+    if (session?.tools?.includes('browser')) {
+      checkBrowser(sessionId).then((r) => setBrowserActive(r.active)).catch(() => setBrowserActive(false))
+    } else {
+      setBrowserActive(false)
+    }
   }, [sessionId])
 
-  // Auto-poll messages for orchestrated sessions so user can watch live
+  // Auto-poll messages for orchestrated or server-active sessions
   const isOrchestrated = session?.sessionType === 'orchestrated'
+  const isServerActive = session?.active === true
   useEffect(() => {
-    if (!sessionId || !isOrchestrated) return
-    const interval = setInterval(() => {
-      fetchMessages(sessionId).then((msgs) => {
+    if (!sessionId || (!isOrchestrated && !isServerActive)) return
+    const interval = setInterval(async () => {
+      try {
+        const msgs = await fetchMessages(sessionId)
         if (msgs.length > messages.length) {
           setMessages(msgs)
         }
-      }).catch(() => {})
-    }, 3000)
+        // Check if session is still active on the server
+        if (isServerActive) {
+          await loadSessions()
+        }
+      } catch {}
+    }, 2000)
     return () => clearInterval(interval)
-  }, [sessionId, isOrchestrated, messages.length])
+  }, [sessionId, isOrchestrated, isServerActive, messages.length])
+
+  // When server-active flag drops, stop the streaming indicator
+  useEffect(() => {
+    if (!sessionId) return
+    if (!isServerActive && streaming && !useChatStore.getState().streamText) {
+      // Server finished but we weren't the ones streaming — clear the indicator
+      fetchMessages(sessionId).then(setMessages).catch(() => {})
+      useChatStore.setState({ streaming: false, streamText: '' })
+    }
+  }, [isServerActive, sessionId])
+
+  // Poll browser status while session has browser tools
+  const hasBrowserTool = session?.tools?.includes('browser')
+  useEffect(() => {
+    if (!sessionId || !hasBrowserTool) return
+    const interval = setInterval(() => {
+      checkBrowser(sessionId).then((r) => setBrowserActive(r.active)).catch(() => {})
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [sessionId, hasBrowserTool])
+
+  // Heartbeat polling for ongoing sessions.
+  useEffect(() => {
+    if (!sessionId || !session?.tools?.length) return
+    if (appSettings.loopMode !== 'ongoing') return
+
+    const raw = appSettings.heartbeatIntervalSec
+    const parsed = typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string'
+        ? Number.parseInt(raw, 10)
+        : Number.NaN
+    const intervalSec = Number.isFinite(parsed) ? Math.max(0, parsed) : 120
+    if (intervalSec <= 0) return
+
+    const interval = setInterval(() => {
+      if (useAppStore.getState().currentSessionId !== sessionId) return
+      if (useChatStore.getState().streaming) return
+      sendHeartbeat(sessionId).catch(() => {})
+    }, intervalSec * 1000)
+
+    return () => clearInterval(interval)
+  }, [sessionId, session?.tools?.length, appSettings.loopMode, appSettings.heartbeatIntervalSec, sendHeartbeat])
+
+  const handleStopBrowser = useCallback(async () => {
+    if (!sessionId) return
+    await stopBrowser(sessionId)
+    setBrowserActive(false)
+  }, [sessionId])
 
   const handleDeploy = useCallback(() => {
     setMenuOpen(false)
@@ -113,6 +180,7 @@ export function ChatArea() {
 
   if (!session) return null
 
+  const isMainChat = session.name === '__main__'
   const isEmpty = !messages.length && !streaming
 
   return (
@@ -124,6 +192,8 @@ export function ChatArea() {
           onStop={stopStreaming}
           onMenuToggle={() => setMenuOpen(!menuOpen)}
           onBack={handleBack}
+          browserActive={browserActive}
+          onStopBrowser={handleStopBrowser}
         />
       )}
       {!isDesktop && (
@@ -133,6 +203,8 @@ export function ChatArea() {
           onStop={stopStreaming}
           onMenuToggle={() => setMenuOpen(!menuOpen)}
           mobile
+          browserActive={browserActive}
+          onStopBrowser={handleStopBrowser}
         />
       )}
       <DevServerBar status={devServerStatus} onStop={handleStopDevServer} />
@@ -212,9 +284,11 @@ export function ChatArea() {
         <DropdownItem onClick={() => { setMenuOpen(false); setConfirmClear(true) }}>
           Clear History
         </DropdownItem>
-        <DropdownItem danger onClick={() => { setMenuOpen(false); setConfirmDelete(true) }}>
-          Delete Session
-        </DropdownItem>
+        {!isMainChat && (
+          <DropdownItem danger onClick={() => { setMenuOpen(false); setConfirmDelete(true) }}>
+            Delete Session
+          </DropdownItem>
+        )}
       </Dropdown>
 
       <ConfirmDialog
@@ -242,14 +316,14 @@ export function ChatArea() {
 function PromptIcon({ type }: { type: string }) {
   const cls = "w-5 h-5"
   switch (type) {
-    case 'bug':
-      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#818CF8' }}><path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3 3 0 0 1 6 0v1M12 20c-3.3 0-6-2.7-6-6v-3a6 6 0 0 1 12 0v3c0 3.3-2.7 6-6 6zM12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M17.47 9c1.93-.2 3.53-1.9 3.53-4" /></svg>
-    case 'code':
-      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#F472B6' }}><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
     case 'book':
-      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#34D399' }}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" /></svg>
+      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#818CF8' }}><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
+    case 'link':
+      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#F472B6' }}><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" /></svg>
+    case 'bot':
+      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#34D399' }}><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z" /><circle cx="9" cy="13" r="1.25" fill="currentColor" /><circle cx="15" cy="13" r="1.25" fill="currentColor" /><path d="M10 17h4" /></svg>
     case 'check':
-      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#FBBF24' }}><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>
+      return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ color: '#FBBF24' }}><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
     default:
       return null
   }

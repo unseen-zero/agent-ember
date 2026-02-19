@@ -5,13 +5,19 @@ import { useAppStore } from '@/stores/use-app-store'
 import { createCredential, deleteCredential } from '@/lib/sessions'
 import { BottomSheet } from './bottom-sheet'
 import { api } from '@/lib/api-client'
-import type { ProviderType, LangGraphProvider, OrchestratorSecret, PluginMeta, MarketplacePlugin } from '@/types'
+import {
+  DEFAULT_AGENT_LOOP_RECURSION_LIMIT,
+  DEFAULT_CLAUDE_CODE_TIMEOUT_SEC,
+  DEFAULT_CLI_PROCESS_TIMEOUT_SEC,
+  DEFAULT_LEGACY_ORCHESTRATOR_MAX_TURNS,
+  DEFAULT_ONGOING_LOOP_MAX_ITERATIONS,
+  DEFAULT_ONGOING_LOOP_MAX_RUNTIME_MINUTES,
+  DEFAULT_ORCHESTRATOR_LOOP_RECURSION_LIMIT,
+  DEFAULT_SHELL_COMMAND_TIMEOUT_SEC,
+} from '@/lib/runtime-loop'
+import type { ProviderType, LoopMode, PluginMeta, MarketplacePlugin } from '@/types'
 
-const LG_PROVIDERS: { id: LangGraphProvider; name: string }[] = [
-  { id: 'anthropic', name: 'Anthropic' },
-  { id: 'openai', name: 'OpenAI' },
-  { id: 'ollama', name: 'Ollama' },
-]
+const NON_LANGGRAPH_PROVIDER_IDS = new Set(['claude-cli', 'codex-cli', 'opencode-cli'])
 
 export function SettingsSheet() {
   const open = useAppStore((s) => s.settingsOpen)
@@ -103,9 +109,12 @@ export function SettingsSheet() {
   const secretList = Object.values(secrets)
 
   // LangGraph config
-  const lgProvider = appSettings.langGraphProvider || 'anthropic'
-  const lgProviderInfo = providers.find((p) => p.id === lgProvider)
+  const lgProviders = providers.filter((p) => !NON_LANGGRAPH_PROVIDER_IDS.has(String(p.id)))
+  const hasConfiguredLgProvider = !!appSettings.langGraphProvider && lgProviders.some((p) => p.id === appSettings.langGraphProvider)
+  const lgProvider = hasConfiguredLgProvider ? appSettings.langGraphProvider! : (lgProviders[0]?.id || 'anthropic')
+  const lgProviderInfo = lgProviders.find((p) => p.id === lgProvider) || providers.find((p) => p.id === lgProvider)
   const lgCredentials = credList.filter((c) => c.provider === lgProvider)
+  const loopMode: LoopMode = appSettings.loopMode === 'ongoing' ? 'ongoing' : 'bounded'
 
   const inputClass = "w-full px-4 py-3.5 rounded-[14px] border border-white/[0.08] bg-bg text-text text-[15px] outline-none transition-all duration-200 placeholder:text-text-3/50 focus-glow"
 
@@ -147,11 +156,11 @@ export function SettingsSheet() {
         <div className="p-6 rounded-[18px] bg-surface border border-white/[0.06]">
           {/* Provider picker */}
           <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-3">Provider</label>
-          <div className="grid grid-cols-3 gap-2 mb-5">
-            {LG_PROVIDERS.map((p) => (
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-5">
+            {lgProviders.map((p) => (
               <button
                 key={p.id}
-                onClick={() => updateSettings({ langGraphProvider: p.id, langGraphModel: '', langGraphCredentialId: null })}
+                onClick={() => updateSettings({ langGraphProvider: p.id, langGraphModel: '', langGraphCredentialId: null, langGraphEndpoint: null })}
                 className={`py-3 px-3 rounded-[12px] text-center cursor-pointer transition-all text-[13px] font-600 border
                   ${lgProvider === p.id
                     ? 'bg-accent-soft border-accent-bright/25 text-accent-bright'
@@ -162,6 +171,11 @@ export function SettingsSheet() {
               </button>
             ))}
           </div>
+          {lgProviders.length === 0 && (
+            <p className="text-[12px] text-text-3/60 mb-5">
+              No orchestration-compatible providers available. Add an API provider in Providers.
+            </p>
+          )}
 
           {/* Model picker */}
           {lgProviderInfo && lgProviderInfo.models.length > 0 && (
@@ -177,6 +191,21 @@ export function SettingsSheet() {
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+            </div>
+          )}
+
+          {(lgProviderInfo?.requiresEndpoint || !!appSettings.langGraphEndpoint) && (
+            <div className="mb-5">
+              <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-3">Endpoint Override</label>
+              <input
+                type="text"
+                value={appSettings.langGraphEndpoint || ''}
+                onChange={(e) => updateSettings({ langGraphEndpoint: e.target.value || null })}
+                placeholder={lgProviderInfo?.defaultEndpoint || 'https://api.example.com/v1'}
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+              <p className="text-[11px] text-text-3/60 mt-2">Leave empty to use the provider default endpoint.</p>
             </div>
           )}
 
@@ -200,6 +229,264 @@ export function SettingsSheet() {
                 No {lgProvider} API keys configured. Add one below in the Providers section.
               </p>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Runtime & Loop Controls */}
+      <div className="mb-10">
+        <h3 className="font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
+          Runtime &amp; Loop Controls
+        </h3>
+        <p className="text-[12px] text-text-3 mb-5">
+          Choose bounded or ongoing agent loops and set safety guards for task execution.
+        </p>
+        <div className="p-6 rounded-[18px] bg-surface border border-white/[0.06]">
+          <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-3">Loop Mode</label>
+          <div className="grid grid-cols-2 gap-2 mb-5">
+            {([
+              { id: 'bounded' as const, name: 'Bounded' },
+              { id: 'ongoing' as const, name: 'Ongoing' },
+            ]).map((mode) => (
+              <button
+                key={mode.id}
+                onClick={() => updateSettings({ loopMode: mode.id })}
+                className={`py-3 px-3 rounded-[12px] text-center cursor-pointer transition-all text-[13px] font-600 border
+                  ${loopMode === mode.id
+                    ? 'bg-accent-soft border-accent-bright/25 text-accent-bright'
+                    : 'bg-bg border-white/[0.06] text-text-2 hover:bg-surface-2'}`}
+                style={{ fontFamily: 'inherit' }}
+              >
+                {mode.name}
+              </button>
+            ))}
+          </div>
+
+          {loopMode === 'bounded' ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+              <div>
+                <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Agent Steps</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={appSettings.agentLoopRecursionLimit ?? DEFAULT_AGENT_LOOP_RECURSION_LIMIT}
+                  onChange={(e) => {
+                    const n = Number.parseInt(e.target.value, 10)
+                    updateSettings({ agentLoopRecursionLimit: Number.isFinite(n) ? n : DEFAULT_AGENT_LOOP_RECURSION_LIMIT })
+                  }}
+                  className={inputClass}
+                  style={{ fontFamily: 'inherit' }}
+                />
+              </div>
+              <div>
+                <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Orchestrator Steps</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={appSettings.orchestratorLoopRecursionLimit ?? DEFAULT_ORCHESTRATOR_LOOP_RECURSION_LIMIT}
+                  onChange={(e) => {
+                    const n = Number.parseInt(e.target.value, 10)
+                    updateSettings({ orchestratorLoopRecursionLimit: Number.isFinite(n) ? n : DEFAULT_ORCHESTRATOR_LOOP_RECURSION_LIMIT })
+                  }}
+                  className={inputClass}
+                  style={{ fontFamily: 'inherit' }}
+                />
+              </div>
+              <div>
+                <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Legacy Turns</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={appSettings.legacyOrchestratorMaxTurns ?? DEFAULT_LEGACY_ORCHESTRATOR_MAX_TURNS}
+                  onChange={(e) => {
+                    const n = Number.parseInt(e.target.value, 10)
+                    updateSettings({ legacyOrchestratorMaxTurns: Number.isFinite(n) ? n : DEFAULT_LEGACY_ORCHESTRATOR_MAX_TURNS })
+                  }}
+                  className={inputClass}
+                  style={{ fontFamily: 'inherit' }}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+              <div>
+                <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Max Steps (Safety Cap)</label>
+                <input
+                  type="number"
+                  min={10}
+                  max={5000}
+                  value={appSettings.ongoingLoopMaxIterations ?? DEFAULT_ONGOING_LOOP_MAX_ITERATIONS}
+                  onChange={(e) => {
+                    const n = Number.parseInt(e.target.value, 10)
+                    updateSettings({ ongoingLoopMaxIterations: Number.isFinite(n) ? n : DEFAULT_ONGOING_LOOP_MAX_ITERATIONS })
+                  }}
+                  className={inputClass}
+                  style={{ fontFamily: 'inherit' }}
+                />
+              </div>
+              <div>
+                <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Max Runtime (Minutes)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={1440}
+                  value={appSettings.ongoingLoopMaxRuntimeMinutes ?? DEFAULT_ONGOING_LOOP_MAX_RUNTIME_MINUTES}
+                  onChange={(e) => {
+                    const n = Number.parseInt(e.target.value, 10)
+                    updateSettings({ ongoingLoopMaxRuntimeMinutes: Number.isFinite(n) ? n : DEFAULT_ONGOING_LOOP_MAX_RUNTIME_MINUTES })
+                  }}
+                  className={inputClass}
+                  style={{ fontFamily: 'inherit' }}
+                />
+                <p className="text-[11px] text-text-3/60 mt-2">Set to 0 to disable the runtime guard.</p>
+              </div>
+            </div>
+          )}
+
+          <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-3">Execution Timeouts (Seconds)</label>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-[11px] text-text-3 mb-2">Shell</label>
+              <input
+                type="number"
+                min={1}
+                max={600}
+                value={appSettings.shellCommandTimeoutSec ?? DEFAULT_SHELL_COMMAND_TIMEOUT_SEC}
+                onChange={(e) => {
+                  const n = Number.parseInt(e.target.value, 10)
+                  updateSettings({ shellCommandTimeoutSec: Number.isFinite(n) ? n : DEFAULT_SHELL_COMMAND_TIMEOUT_SEC })
+                }}
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-text-3 mb-2">Claude Code Tool</label>
+              <input
+                type="number"
+                min={5}
+                max={7200}
+                value={appSettings.claudeCodeTimeoutSec ?? DEFAULT_CLAUDE_CODE_TIMEOUT_SEC}
+                onChange={(e) => {
+                  const n = Number.parseInt(e.target.value, 10)
+                  updateSettings({ claudeCodeTimeoutSec: Number.isFinite(n) ? n : DEFAULT_CLAUDE_CODE_TIMEOUT_SEC })
+                }}
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-text-3 mb-2">CLI Provider Process</label>
+              <input
+                type="number"
+                min={10}
+                max={7200}
+                value={appSettings.cliProcessTimeoutSec ?? DEFAULT_CLI_PROCESS_TIMEOUT_SEC}
+                onChange={(e) => {
+                  const n = Number.parseInt(e.target.value, 10)
+                  updateSettings({ cliProcessTimeoutSec: Number.isFinite(n) ? n : DEFAULT_CLI_PROCESS_TIMEOUT_SEC })
+                }}
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Voice */}
+      <div className="mb-10">
+        <h3 className="font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
+          Voice
+        </h3>
+        <p className="text-[12px] text-text-3 mb-5">
+          Configure voice playback (TTS) and speech-to-text input.
+        </p>
+        <div className="p-6 rounded-[18px] bg-surface border border-white/[0.06]">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+            <div>
+              <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">ElevenLabs API Key</label>
+              <input
+                type="password"
+                value={appSettings.elevenLabsApiKey || ''}
+                onChange={(e) => updateSettings({ elevenLabsApiKey: e.target.value || null })}
+                placeholder="sk_..."
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+            </div>
+            <div>
+              <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">ElevenLabs Voice ID</label>
+              <input
+                type="text"
+                value={appSettings.elevenLabsVoiceId || ''}
+                onChange={(e) => updateSettings({ elevenLabsVoiceId: e.target.value || null })}
+                placeholder="JBFqnCBsd6RMkjVDRZzb"
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Speech Recognition Language</label>
+            <input
+              type="text"
+              value={appSettings.speechRecognitionLang || ''}
+              onChange={(e) => updateSettings({ speechRecognitionLang: e.target.value || null })}
+              placeholder="en-US (blank = browser default)"
+              className={inputClass}
+              style={{ fontFamily: 'inherit' }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Heartbeat */}
+      <div className="mb-10">
+        <h3 className="font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
+          Heartbeat
+        </h3>
+        <p className="text-[12px] text-text-3 mb-5">
+          Configure ongoing heartbeat checks for long-lived sessions.
+        </p>
+        <div className="p-6 rounded-[18px] bg-surface border border-white/[0.06]">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+            <div>
+              <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Heartbeat Interval (Seconds)</label>
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                value={appSettings.heartbeatIntervalSec ?? 120}
+                onChange={(e) => {
+                  const n = Number.parseInt(e.target.value, 10)
+                  updateSettings({ heartbeatIntervalSec: Number.isFinite(n) ? Math.max(0, n) : 120 })
+                }}
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+              <p className="text-[11px] text-text-3/60 mt-2">Set to 0 to disable heartbeat polling.</p>
+            </div>
+            <div>
+              <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-2">Heartbeat Prompt</label>
+              <input
+                type="text"
+                value={appSettings.heartbeatPrompt || ''}
+                onChange={(e) => updateSettings({ heartbeatPrompt: e.target.value || null })}
+                placeholder="SWARM_HEARTBEAT_CHECK"
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-[11px] text-text-3/60 mt-2">
+              Internal ping text used for ongoing sessions. Leave blank to use the default.
+            </p>
           </div>
         </div>
       </div>

@@ -3,11 +3,10 @@ import {
   loadSessions, saveSessions, loadAgents,
   loadCredentials, decryptKey, loadSettings, loadSkills,
 } from './storage'
+import { loadRuntimeSettings, getLegacyOrchestratorMaxTurns } from './runtime-settings'
 import { getMemoryDb } from './memory-db'
 import { getProvider } from '../providers'
 import type { Agent } from '@/types'
-
-const MAX_TURNS = 10
 
 /**
  * Creates the orchestrator session and returns its ID immediately.
@@ -56,9 +55,9 @@ export async function executeOrchestrator(
   task: string,
   sessionId: string,
 ): Promise<string> {
-  // API-based providers use LangGraph with proper tool calling
-  const isApiProvider = orchestrator.provider === 'anthropic' || orchestrator.provider === 'openai' || orchestrator.provider === 'ollama'
-  if (isApiProvider) {
+  // Use LangGraph for all non-CLI providers (including OpenAI-compatible custom providers)
+  const isCliProvider = orchestrator.provider === 'claude-cli' || orchestrator.provider === 'codex-cli' || orchestrator.provider === 'opencode-cli'
+  if (!isCliProvider) {
     console.log(`[orchestrator] Using LangGraph engine for ${orchestrator.name} (${orchestrator.provider})`)
     const { executeLangGraphOrchestrator } = await import('./orchestrator-lg')
     return executeLangGraphOrchestrator(orchestrator, task, sessionId)
@@ -130,8 +129,24 @@ async function executeOrchestratorLegacy(
   conversationHistory.push({ role: 'user', text: task })
 
   let result = ''
+  const runtime = loadRuntimeSettings()
+  const maxTurns = getLegacyOrchestratorMaxTurns(runtime)
+  const loopStart = Date.now()
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
+  for (let turn = 0; turn < maxTurns; turn++) {
+    if (runtime.loopMode === 'ongoing' && runtime.ongoingLoopMaxRuntimeMs) {
+      const elapsed = Date.now() - loopStart
+      if (elapsed >= runtime.ongoingLoopMaxRuntimeMs) {
+        const timeoutMsg = 'Ongoing loop stopped after reaching the configured runtime limit.'
+        session.messages.push({ role: 'assistant' as const, text: timeoutMsg, time: Date.now() })
+        session.lastActiveAt = Date.now()
+        const s = loadSessions()
+        s[sessionId] = session
+        saveSessions(s)
+        return timeoutMsg
+      }
+    }
+
     const fullText = await callProvider(orchestrator, systemPrompt, conversationHistory)
     conversationHistory.push({ role: 'assistant', text: fullText })
 
@@ -203,6 +218,10 @@ async function executeOrchestratorLegacy(
       result = fullText
       break
     }
+  }
+
+  if (!result) {
+    result = `Loop stopped after reaching max turns (${maxTurns}).`
   }
 
   return result

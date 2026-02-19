@@ -1,44 +1,18 @@
+import fs from 'fs'
 import { createReactAgent } from '@langchain/langgraph/prebuilt'
-import { ChatAnthropic } from '@langchain/anthropic'
-import { ChatOpenAI } from '@langchain/openai'
+import { HumanMessage, AIMessage } from '@langchain/core/messages'
 import { buildSessionTools } from './session-tools'
-import { loadCredentials, decryptKey, loadSettings, loadAgents, loadSkills, appendUsage } from './storage'
+import { buildChatModel } from './build-llm'
+import { loadSettings, loadAgents, loadSkills, appendUsage } from './storage'
 import { estimateCost } from './cost'
 import { getPluginManager } from './plugins'
+import { loadRuntimeSettings, getAgentLoopRecursionLimit } from './runtime-settings'
 import type { Session, Message, UsageRecord } from '@/types'
-
-const OLLAMA_CLOUD_URL = 'https://ollama.com/v1'
-const OLLAMA_LOCAL_URL = 'http://localhost:11434/v1'
-const MAX_RECURSION = 15
-
-function buildLLM(session: Session, apiKey: string | null) {
-  const provider = session.provider
-
-  if (provider === 'anthropic') {
-    return new ChatAnthropic({
-      model: session.model || 'claude-sonnet-4-6',
-      anthropicApiKey: apiKey || undefined,
-      maxTokens: 8192,
-    })
-  }
-  if (provider === 'openai') {
-    return new ChatOpenAI({
-      model: session.model || 'gpt-4o',
-      apiKey: apiKey || undefined,
-    })
-  }
-  // ollama — uses OpenAI-compatible endpoint
-  const baseURL = apiKey ? OLLAMA_CLOUD_URL : (session.apiEndpoint ? `${session.apiEndpoint}/v1` : `${OLLAMA_LOCAL_URL}`)
-  return new ChatOpenAI({
-    model: session.model || 'qwen3.5',
-    apiKey: apiKey || 'ollama',
-    configuration: { baseURL },
-  })
-}
 
 interface StreamAgentChatOpts {
   session: Session
   message: string
+  imagePath?: string
   apiKey: string | null
   systemPrompt?: string
   write: (data: string) => void
@@ -46,64 +20,187 @@ interface StreamAgentChatOpts {
   fallbackCredentialIds?: string[]
 }
 
+function buildToolCapabilityLines(enabledTools: string[]): string[] {
+  const lines: string[] = []
+  if (enabledTools.includes('shell')) lines.push('- Shell execution is available (`execute_command`). Use it for real checks/build/test steps.')
+  if (enabledTools.includes('files')) lines.push('- File operations are available (`read_file`, `write_file`, `list_files`, `send_file`). Use them to inspect and produce artifacts.')
+  if (enabledTools.includes('edit_file')) lines.push('- Precise single-match replacement is available (`edit_file`).')
+  if (enabledTools.includes('web_search')) lines.push('- Web search is available (`web_search`). Use it for external research, options discovery, and validation.')
+  if (enabledTools.includes('web_fetch')) lines.push('- URL content extraction is available (`web_fetch`) for source-backed analysis.')
+  if (enabledTools.includes('browser')) lines.push('- Browser automation is available (`browser`). Use it for interactive websites and screenshots.')
+  if (enabledTools.includes('claude_code')) lines.push('- Claude Code delegation is available (`delegate_to_claude_code`) for deep coding/refactor tasks.')
+  if (enabledTools.includes('memory')) lines.push('- Long-term memory is available (`memory_tool`) to store and recall durable context.')
+  if (enabledTools.includes('manage_agents')) lines.push('- Agent management is available (`manage_agents`) to create or adjust specialist agents.')
+  if (enabledTools.includes('manage_tasks')) lines.push('- Task management is available (`manage_tasks`) to create and track execution plans.')
+  if (enabledTools.includes('manage_schedules')) lines.push('- Schedule management is available (`manage_schedules`) for recurring/ongoing runs.')
+  if (enabledTools.includes('manage_skills')) lines.push('- Skill management is available (`manage_skills`) to add reusable capabilities.')
+  if (enabledTools.includes('manage_connectors')) lines.push('- Connector management is available (`manage_connectors`) for channels like WhatsApp/Telegram/Slack.')
+  if (enabledTools.includes('manage_sessions')) lines.push('- Session management is available (`manage_sessions`) to inspect current platform activity.')
+  return lines
+}
+
+function buildAgenticExecutionPolicy(opts: {
+  enabledTools: string[]
+  loopMode: 'bounded' | 'ongoing'
+  heartbeatPrompt: string
+  heartbeatIntervalSec: number
+}) {
+  const hasTooling = opts.enabledTools.length > 0
+  const toolLines = buildToolCapabilityLines(opts.enabledTools)
+  return [
+    '## Agentic Execution Policy',
+    'You are not a passive chatbot. Execute work proactively and use available tools to gather evidence, create artifacts, and make progress.',
+    hasTooling
+      ? 'For open-ended requests, run an action loop: plan briefly, execute tools, evaluate results, then continue until meaningful progress is achieved.'
+      : 'This session has no tools enabled, so be explicit about what tool access is needed for deeper execution.',
+    'Do not stop at generic advice when the request implies action (research, coding, setup, business ideas, optimization, automation, or platform operations).',
+    'For multi-step work, keep the user informed with short progress updates tied to real actions (what you are doing now, what finished, and what is next).',
+    'If you state an intention to do research/build/execute, immediately follow through with tool calls in the same run.',
+    'Never claim completed research/build results without tool evidence. If a tool fails or returns empty results, say that clearly and retry with another approach.',
+    'Before finalizing: verify key claims with concrete outputs from tools whenever tools are available.',
+    opts.loopMode === 'ongoing'
+      ? 'Loop mode is ONGOING: prefer continued execution and progress tracking over one-shot replies; keep iterating until done, blocked, or safety/runtime limits are reached.'
+      : 'Loop mode is BOUNDED: still execute multiple steps when needed, but finish within the recursion budget.',
+    opts.enabledTools.includes('manage_tasks')
+      ? 'When goals are long-lived, create/update tasks in the task board so progress is trackable over time.'
+      : '',
+    opts.enabledTools.includes('manage_schedules')
+      ? 'When goals require follow-up, create schedules for recurring checks or future actions instead of waiting for manual prompts.'
+      : '',
+    opts.enabledTools.includes('manage_agents')
+      ? 'If a specialist would improve output, create or configure a focused agent and assign work accordingly.'
+      : '',
+    opts.enabledTools.includes('manage_connectors')
+      ? 'If the user wants proactive outreach (e.g., WhatsApp updates), configure connectors and pair with schedules/tasks to deliver status updates.'
+      : '',
+    opts.enabledTools.includes('manage_sessions')
+      ? 'When coordinating platform work, inspect existing sessions and avoid duplicating active efforts.'
+      : '',
+    'Ask for confirmation only for high-risk or irreversible actions. For normal low-risk research/build steps, proceed autonomously.',
+    `Heartbeat protocol: if the user message is exactly "${opts.heartbeatPrompt}", reply exactly "HEARTBEAT_OK" when there is nothing important to report; otherwise reply with a concise progress update and immediate next step.`,
+    opts.heartbeatIntervalSec > 0
+      ? `Expected heartbeat cadence is roughly every ${opts.heartbeatIntervalSec} seconds while ongoing work is active.`
+      : '',
+    toolLines.length ? 'Available capabilities:\n' + toolLines.join('\n') : '',
+  ].filter(Boolean).join('\n')
+}
+
 export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string> {
-  const { session, message, apiKey, systemPrompt, write, history, fallbackCredentialIds } = opts
+  const { session, message, imagePath, apiKey, systemPrompt, write, history, fallbackCredentialIds } = opts
 
-  // Build LLM with failover support
-  const credentialChain = [apiKey]
-  if (fallbackCredentialIds?.length) {
-    for (const credId of fallbackCredentialIds) {
-      try {
-        const creds = loadCredentials()
-        const cred = creds[credId]
-        if (cred?.encryptedKey) {
-          credentialChain.push(decryptKey(cred.encryptedKey))
-        }
-      } catch { /* skip invalid cred */ }
-    }
-  }
-  const llm = buildLLM(session, apiKey)
+  // fallbackCredentialIds is intentionally accepted for compatibility with caller signatures.
+  void fallbackCredentialIds
+  const llm = buildChatModel({
+    provider: session.provider,
+    model: session.model,
+    apiKey,
+    apiEndpoint: session.apiEndpoint,
+  })
 
-  // Build stateModifier: [userPrompt] \n\n [soul] \n\n [systemPrompt]
+  // Build stateModifier
   const settings = loadSettings()
+  const runtime = loadRuntimeSettings()
+  const heartbeatPrompt = (typeof settings.heartbeatPrompt === 'string' && settings.heartbeatPrompt.trim())
+    ? settings.heartbeatPrompt.trim()
+    : 'SWARM_HEARTBEAT_CHECK'
+  const heartbeatIntervalSec = (() => {
+    const raw = settings.heartbeatIntervalSec
+    const parsed = typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string'
+        ? Number.parseInt(raw, 10)
+        : Number.NaN
+    if (!Number.isFinite(parsed)) return 120
+    return Math.max(0, Math.min(3600, Math.trunc(parsed)))
+  })()
+
   const stateModifierParts: string[] = []
-  if (settings.userPrompt) stateModifierParts.push(settings.userPrompt)
-  // Load agent soul if session has an agent
+  const hasProvidedSystemPrompt = typeof systemPrompt === 'string' && systemPrompt.trim().length > 0
+
+  if (hasProvidedSystemPrompt) {
+    stateModifierParts.push(systemPrompt!.trim())
+  } else {
+    if (settings.userPrompt) stateModifierParts.push(settings.userPrompt)
+  }
+
+  // Load agent context when a full prompt was not already composed by the route layer.
   let agentPlatformAssignScope: 'self' | 'all' = 'self'
   if (session.agentId) {
     const agents = loadAgents()
     const agent = agents[session.agentId]
     agentPlatformAssignScope = agent?.platformAssignScope || 'self'
-    if (agent?.soul) stateModifierParts.push(agent.soul)
-    // Inject dynamic skills
-    if (agent?.skillIds?.length) {
-      const allSkills = loadSkills()
-      for (const skillId of agent.skillIds) {
-        const skill = allSkills[skillId]
-        if (skill?.content) stateModifierParts.push(`## Skill: ${skill.name}\n${skill.content}`)
+    if (!hasProvidedSystemPrompt) {
+      if (agent?.soul) stateModifierParts.push(agent.soul)
+      if (agent?.systemPrompt) stateModifierParts.push(agent.systemPrompt)
+      if (agent?.skillIds?.length) {
+        const allSkills = loadSkills()
+        for (const skillId of agent.skillIds) {
+          const skill = allSkills[skillId]
+          if (skill?.content) stateModifierParts.push(`## Skill: ${skill.name}\n${skill.content}`)
+        }
       }
     }
   }
-  stateModifierParts.push(systemPrompt || 'You are a helpful AI assistant with access to tools. Use them when appropriate to help the user.')
+
+  if (!hasProvidedSystemPrompt) {
+    stateModifierParts.push('You are a capable AI assistant with tool access. Be execution-oriented and outcome-focused.')
+  }
+
+  stateModifierParts.push(
+    buildAgenticExecutionPolicy({
+      enabledTools: session.tools || [],
+      loopMode: runtime.loopMode,
+      heartbeatPrompt,
+      heartbeatIntervalSec,
+    }),
+  )
+
   const stateModifier = stateModifierParts.join('\n\n')
 
-  const tools = buildSessionTools(session.cwd, session.tools || [], {
+  const { tools, cleanup } = buildSessionTools(session.cwd, session.tools || [], {
     agentId: session.agentId,
     sessionId: session.id,
     platformAssignScope: agentPlatformAssignScope,
   })
   const agent = createReactAgent({ llm, tools, stateModifier })
+  const recursionLimit = getAgentLoopRecursionLimit(runtime)
 
   // Build message history for context
-  const langchainMessages = history
-    .slice(-20) // Keep last 20 messages for context
-    .map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.text,
-    }))
+  const IMAGE_EXTS = /\.(png|jpg|jpeg|gif|webp|bmp)$/i
+  const TEXT_EXTS = /\.(txt|md|csv|json|xml|html|js|ts|tsx|jsx|py|go|rs|java|c|cpp|h|yml|yaml|toml|env|log|sh|sql|css|scss)$/i
+
+  function buildLangChainContent(text: string, filePath?: string): any {
+    if (!filePath || !fs.existsSync(filePath)) return text
+    if (IMAGE_EXTS.test(filePath)) {
+      const data = fs.readFileSync(filePath).toString('base64')
+      const ext = filePath.split('.').pop()?.toLowerCase() || 'png'
+      const mimeType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
+      return [
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${data}` } },
+        { type: 'text', text },
+      ]
+    }
+    if (TEXT_EXTS.test(filePath) || filePath.endsWith('.pdf')) {
+      try {
+        const fileContent = fs.readFileSync(filePath, 'utf-8')
+        const name = filePath.split('/').pop() || 'file'
+        return `[Attached file: ${name}]\n\n${fileContent}\n\n${text}`
+      } catch { return text }
+    }
+    return `[Attached file: ${filePath.split('/').pop()}]\n\n${text}`
+  }
+
+  const langchainMessages: Array<HumanMessage | AIMessage> = []
+  for (const m of history.slice(-20)) {
+    if (m.role === 'user') {
+      langchainMessages.push(new HumanMessage({ content: buildLangChainContent(m.text, m.imagePath) }))
+    } else {
+      langchainMessages.push(new AIMessage({ content: m.text }))
+    }
+  }
 
   // Add current message
-  langchainMessages.push({ role: 'user' as const, content: message })
+  langchainMessages.push(new HumanMessage({ content: buildLangChainContent(message, imagePath) }))
 
   let fullText = ''
   let totalInputTokens = 0
@@ -113,10 +210,19 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
   const pluginMgr = getPluginManager()
   await pluginMgr.runHook('beforeAgentStart', { session, message })
 
+  const abortController = new AbortController()
+  let timedOut = false
+  const loopTimer = runtime.loopMode === 'ongoing' && runtime.ongoingLoopMaxRuntimeMs
+    ? setTimeout(() => {
+        timedOut = true
+        abortController.abort()
+      }, runtime.ongoingLoopMaxRuntimeMs)
+    : null
+
   try {
     const eventStream = agent.streamEvents(
       { messages: langchainMessages },
-      { version: 'v2', recursionLimit: MAX_RECURSION },
+      { version: 'v2', recursionLimit, signal: abortController.signal },
     )
 
     for await (const event of eventStream) {
@@ -173,8 +279,12 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
       }
     }
   } catch (err: any) {
-    const errMsg = err.message || String(err)
+    const errMsg = timedOut
+      ? 'Ongoing loop stopped after reaching the configured runtime limit.'
+      : err.message || String(err)
     write(`data: ${JSON.stringify({ t: 'err', text: errMsg })}\n\n`)
+  } finally {
+    if (loopTimer) clearTimeout(loopTimer)
   }
 
   // Track cost
@@ -202,6 +312,9 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
 
   // Plugin hooks: afterAgentComplete
   await pluginMgr.runHook('afterAgentComplete', { session, response: fullText })
+
+  // Clean up browser and other session resources
+  await cleanup()
 
   return fullText
 }

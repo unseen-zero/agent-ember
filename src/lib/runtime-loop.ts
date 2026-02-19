@@ -1,0 +1,15 @@
+import type { LoopMode } from '@/types'
+
+export const DEFAULT_LOOP_MODE: LoopMode = 'bounded'
+
+// Loop limits
+export const DEFAULT_AGENT_LOOP_RECURSION_LIMIT = 15
+export const DEFAULT_ORCHESTRATOR_LOOP_RECURSION_LIMIT = 25
+export const DEFAULT_LEGACY_ORCHESTRATOR_MAX_TURNS = 10
+export const DEFAULT_ONGOING_LOOP_MAX_ITERATIONS = 250
+export const DEFAULT_ONGOING_LOOP_MAX_RUNTIME_MINUTES = 60
+
+// Tool/process timeouts
+export const DEFAULT_SHELL_COMMAND_TIMEOUT_SEC = 30
+export const DEFAULT_CLAUDE_CODE_TIMEOUT_SEC = 120
+export const DEFAULT_CLI_PROCESS_TIMEOUT_SEC = 300

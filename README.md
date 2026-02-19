@@ -20,16 +20,20 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 
 ## Features
 
-- **Multi-Provider Chat** — Claude CLI, OpenAI, Anthropic API, Ollama, OpenClaw, and custom OpenAI-compatible endpoints (OpenRouter, Together, Groq, etc.)
+- **15 Built-in Providers** — Claude Code CLI, OpenAI Codex CLI, OpenCode CLI, Anthropic, OpenAI, Google Gemini, DeepSeek, Groq, Together AI, Mistral AI, xAI (Grok), Fireworks AI, Ollama, OpenClaw, plus custom OpenAI-compatible endpoints
 - **OpenClaw Integration** — Connect to remote [OpenClaw](https://github.com/openclaw/openclaw) instances as providers. Control a swarm of autonomous AI agents from a single dashboard
-- **Agent Builder** — Create agents with custom personalities (soul), system prompts, tools, and skills
-- **Agent Tools** — Shell, files, edit file (search & replace), web search (DuckDuckGo), web fetch, Claude Code delegation, and Playwright browser automation
+- **Agent Builder** — Create agents with custom personalities (soul), system prompts, tools, and skills. AI-powered generation from a description
+- **Agent Tools** — Shell, files, edit file, send file, web search, web fetch, Claude Code delegation, Playwright browser automation, and persistent memory
+- **Platform Tools** — Agents can manage other agents, tasks, schedules, skills, connectors, and sessions via built-in platform tools
 - **Orchestration** — Multi-agent workflows powered by LangGraph with automatic sub-agent routing
+- **Agentic Execution Policy** — Tool-first autonomous action loop with progress updates, evidence-driven answers, and better use of platform tools for long-lived work
 - **Task Board** — Queue and track agent tasks with status, comments, and results
 - **Background Daemon** — Auto-processes queued tasks and scheduled jobs with a 30s heartbeat
 - **Scheduling** — Cron-based agent scheduling with human-friendly presets
+- **Loop Runtime Controls** — Switch between bounded and ongoing loops with configurable step caps, runtime guards, heartbeat cadence, and timeout budgets
+- **Voice Settings** — Per-instance ElevenLabs API key + voice ID for TTS replies, plus configurable speech recognition language for chat input
 - **Chat Connectors** — Bridge agents to Discord, Slack, Telegram, and WhatsApp
-- **Skills System** — Discover skills from `~/.claude/skills/` and assign them to agents
+- **Skills System** — Discover local skills, import skills from URL, and load OpenClaw `SKILL.md` files (frontmatter-compatible)
 - **Memory** — Per-agent and per-session memory with hybrid FTS5 + vector embeddings search
 - **Cost Tracking** — Per-message token counting and cost estimation displayed in the chat header
 - **Model Failover** — Automatic key rotation on rate limits and auth errors with configurable fallback credentials
@@ -43,6 +47,8 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 - **Node.js** 20+
 - **npm** 10+
 - **Claude Code CLI** (optional, for `claude-cli` provider) — [Install](https://docs.anthropic.com/en/docs/claude-code/overview)
+- **OpenAI Codex CLI** (optional, for `codex-cli` provider) — [Install](https://github.com/openai/codex)
+- **OpenCode CLI** (optional, for `opencode-cli` provider) — [Install](https://github.com/opencode-ai/opencode)
 
 ## Quick Start
 
@@ -107,13 +113,34 @@ src/
 
 ## Providers
 
+### CLI Providers
+
+| Provider | Binary | Notes |
+|-|-|-|
+| Claude Code CLI | `claude` | Spawns with `--output-format stream-json`. Full tool use via CLI. |
+| OpenAI Codex CLI | `codex` | Spawns with `--full-auto`. Requires Codex CLI installed. |
+| OpenCode CLI | `opencode` | Spawns with `-p` flag. Multi-model support. |
+
+### API Providers
+
+| Provider | Endpoint | Models |
+|-|-|-|
+| Anthropic | api.anthropic.com | Claude Sonnet 4.6, Opus 4.6, Haiku 4.5 |
+| OpenAI | api.openai.com | GPT-4o, GPT-4.1, o3, o4-mini |
+| Google Gemini | generativelanguage.googleapis.com | Gemini 2.5 Pro, Flash, Flash Lite |
+| DeepSeek | api.deepseek.com | DeepSeek Chat, Reasoner |
+| Groq | api.groq.com | Llama 3.3 70B, DeepSeek R1, Qwen QWQ |
+| Together AI | api.together.xyz | Llama 4 Maverick, DeepSeek R1, Qwen 2.5 |
+| Mistral AI | api.mistral.ai | Mistral Large, Small, Magistral, Devstral |
+| xAI (Grok) | api.x.ai | Grok 3, Grok 3 Fast, Grok 3 Mini |
+| Fireworks AI | api.fireworks.ai | DeepSeek R1, Llama 3.3 70B, Qwen 3 |
+
+### Local & Remote
+
 | Provider | Type | Notes |
 |-|-|-|
-| Claude CLI | Subprocess | Spawns `claude` with `--output-format stream-json`. Requires Claude Code installed. |
-| Anthropic | API | Direct API calls. Requires API key. |
-| OpenAI | API | GPT-4o, o3, o4-mini, etc. Requires API key. |
+| Ollama | Local/Cloud | Connects to `localhost:11434`. No API key needed. 50+ models. |
 | OpenClaw | Remote Agent | Connects to a remote [OpenClaw](https://github.com/openclaw/openclaw) instance via its `/v1` API. |
-| Ollama | Local | Connects to `localhost:11434`. No API key needed. |
 | Custom | API | Any OpenAI-compatible endpoint. Add via Providers sidebar. |
 
 ### OpenClaw
@@ -147,14 +174,28 @@ Agents can use the following tools when enabled:
 | Tool | Description |
 |-|-|
 | Shell | Execute commands in the session working directory |
-| Files | Read, write, and list files |
+| Files | Read, write, list, and send files |
 | Edit File | Search-and-replace editing (exact match required) |
 | Web Search | Search the web via DuckDuckGo HTML scraping |
 | Web Fetch | Fetch and extract text content from URLs (uses cheerio) |
 | Claude Code | Delegate complex tasks to Claude Code CLI |
-| Browser | Playwright-powered web browsing via MCP |
+| Browser | Playwright-powered web browsing via MCP (navigate, click, type, screenshot, PDF) |
+| Memory | Store and retrieve long-term memories with FTS5 + vector search |
 
-Enable tools per-session or per-agent in the UI.
+### Platform Tools
+
+Agents with platform tools enabled can manage the SwarmClaw instance:
+
+| Tool | Description |
+|-|-|
+| Manage Agents | List, create, update, delete agents |
+| Manage Tasks | Create and manage task board items with agent assignment |
+| Manage Schedules | Create cron, interval, or one-time scheduled jobs |
+| Manage Skills | List, create, update reusable skill definitions |
+| Manage Connectors | Manage chat platform bridges |
+| Manage Sessions | List and view chat sessions (read-only) |
+
+Enable tools per-session or per-agent in the UI. CLI providers (Claude Code, Codex, OpenCode) handle tools natively through their own CLI.
 
 ## Cost Tracking
 
@@ -170,6 +211,24 @@ The daemon auto-processes queued tasks from the scheduler on a 30-second interva
 
 - **API:** `GET /api/daemon` (status), `POST /api/daemon` with `{"action": "start"}` or `{"action": "stop"}`
 - Auto-starts on boot if queued tasks are found
+
+## Loop Modes
+
+Configure loop behavior in **Settings → Runtime & Loop Controls**:
+
+- **Bounded**: fixed max steps for agent and orchestrator loops (default behavior)
+- **Ongoing**: loops keep iterating until they hit your safety cap and optional runtime limit
+
+You can also tune shell timeout, Claude Code delegation timeout, and CLI provider process timeout from the same settings panel.
+
+## Voice & Heartbeat
+
+Configure these in **Settings**:
+
+- **Voice** — set `ElevenLabs API Key`, `ElevenLabs Voice ID`, and `Speech Recognition Language`
+- **Heartbeat** — set `Heartbeat Interval (Seconds)` and `Heartbeat Prompt` for ongoing session pings
+
+Heartbeat pings are internal checks for ongoing sessions. If there's no new status, the assistant returns `HEARTBEAT_OK`; otherwise it returns a concise progress update and next step.
 
 ## Embeddings & Hybrid Memory Search
 

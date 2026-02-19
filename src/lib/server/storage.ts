@@ -29,6 +29,7 @@ const COLLECTIONS = [
   'provider_configs',
   'skills',
   'connectors',
+  'model_overrides',
 ] as const
 
 for (const table of COLLECTIONS) {
@@ -356,6 +357,15 @@ export function loadProviderConfigs(): Record<string, any> {
 
 export function saveProviderConfigs(p: Record<string, any>) {
   saveCollection('provider_configs', p)
+}
+
+// --- Model Overrides (user-added models for built-in providers) ---
+export function loadModelOverrides(): Record<string, string[]> {
+  return loadCollection('model_overrides') as Record<string, string[]>
+}
+
+export function saveModelOverrides(m: Record<string, string[]>) {
+  saveCollection('model_overrides', m)
 }
 
 // --- Skills ---

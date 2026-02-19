@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
+import { api } from '@/lib/api-client'
 import type { Connector, ConnectorPlatform } from '@/types'
 
 const PLATFORM_ICONS: Record<ConnectorPlatform, { color: string; label: string }> = {
@@ -18,11 +19,34 @@ export function ConnectorList({ inSidebar }: { inSidebar?: boolean }) {
   const setEditingConnectorId = useAppStore((s) => s.setEditingConnectorId)
   const agents = useAppStore((s) => s.agents)
   const loadAgents = useAppStore((s) => s.loadAgents)
+  const [toggling, setToggling] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     loadConnectors()
     loadAgents()
   }, [])
+
+  // Auto-clear error after 5s
+  useEffect(() => {
+    if (error) { const t = setTimeout(() => setError(null), 5000); return () => clearTimeout(t) }
+  }, [error])
+
+  const handleToggle = async (e: React.MouseEvent, c: Connector) => {
+    e.stopPropagation()
+    const action = c.status === 'running' ? 'stop' : 'start'
+    setToggling(c.id)
+    setError(null)
+    try {
+      await api('PUT', `/connectors/${c.id}`, { action })
+      await loadConnectors()
+    } catch (err: any) {
+      setError(err.message || `Failed to ${action}`)
+      await loadConnectors()
+    } finally {
+      setToggling(null)
+    }
+  }
 
   const list = Object.values(connectors) as Connector[]
 
@@ -42,38 +66,80 @@ export function ConnectorList({ inSidebar }: { inSidebar?: boolean }) {
 
   return (
     <div className="flex-1 overflow-y-auto pb-20">
+      {error && (
+        <div className="mx-4 mt-2 mb-1 px-3 py-2 rounded-[8px] bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] leading-snug">
+          {error}
+        </div>
+      )}
       {list.map((c) => {
         const platform = PLATFORM_ICONS[c.platform]
         const agent = agents[c.agentId]
+        const isRunning = c.status === 'running'
+        const isToggling = toggling === c.id
+        // Can only toggle if connector has credentials (or is WhatsApp which uses QR)
+        const hasCredentials = c.platform === 'whatsapp' || !!c.credentialId
         return (
-          <button
+          <div
             key={c.id}
-            onClick={() => { setEditingConnectorId(c.id); setConnectorSheetOpen(true) }}
-            className="w-full flex items-center gap-3 px-5 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer bg-transparent border-none text-left"
+            className="w-full flex items-center gap-3 px-5 py-3 hover:bg-white/[0.02] transition-colors group"
           >
-            {/* Platform indicator */}
-            <div
-              className="w-9 h-9 rounded-[10px] flex items-center justify-center shrink-0 text-white text-[11px] font-700"
-              style={{ backgroundColor: platform.color }}
+            {/* Clickable area — opens editor */}
+            <button
+              onClick={() => { setEditingConnectorId(c.id); setConnectorSheetOpen(true) }}
+              className="flex items-center gap-3 flex-1 min-w-0 cursor-pointer bg-transparent border-none text-left p-0"
             >
-              {platform.label.slice(0, 2).toUpperCase()}
-            </div>
+              <div
+                className="w-9 h-9 rounded-[10px] flex items-center justify-center shrink-0 text-white text-[11px] font-700"
+                style={{ backgroundColor: platform.color }}
+              >
+                {platform.label.slice(0, 2).toUpperCase()}
+              </div>
 
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[13px] font-600 text-text truncate">{c.name}</span>
-                <span
-                  className={`shrink-0 w-2 h-2 rounded-full ${
-                    c.status === 'running' ? 'bg-green-400' :
-                    c.status === 'error' ? 'bg-red-400' : 'bg-white/20'
-                  }`}
-                />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-600 text-text truncate">{c.name}</span>
+                  <span
+                    className={`shrink-0 w-2 h-2 rounded-full ${
+                      isRunning ? 'bg-green-400' :
+                      c.status === 'error' ? 'bg-red-400' : 'bg-white/20'
+                    }`}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 truncate">
+                  {c.lastError
+                    ? <span className="text-red-400">{c.lastError.slice(0, 60)}{c.lastError.length > 60 ? '...' : ''}</span>
+                    : <>{platform.label} {agent ? `\u2192 ${agent.name}` : ''}</>
+                  }
+                </div>
               </div>
-              <div className="text-[11px] text-text-3 truncate">
-                {platform.label} {agent ? `\u2192 ${agent.name}` : ''}
-              </div>
-            </div>
-          </button>
+            </button>
+
+            {/* Toggle button — visible on hover, only if connector has credentials */}
+            {hasCredentials && <button
+              onClick={(e) => handleToggle(e, c)}
+              disabled={isToggling}
+              title={isRunning ? 'Stop connector' : 'Start connector'}
+              className={`shrink-0 w-8 h-8 rounded-[8px] flex items-center justify-center transition-all cursor-pointer border-none ${
+                isToggling ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+              } ${
+                isRunning
+                  ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
+                  : 'bg-green-500/10 text-green-400 hover:bg-green-500/20'
+              } disabled:opacity-50`}
+            >
+              {isToggling ? (
+                <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+              ) : isRunning ? (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="4" y="4" width="16" height="16" rx="2" />
+                </svg>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="6,3 21,12 6,21" />
+                </svg>
+              )}
+            </button>}
+          </div>
         )
       })}
     </div>

@@ -55,6 +55,24 @@ export function StreamingBubble({ text, assistantName }: Props) {
                   }
                   return <code className={className}>{children}</code>
                 },
+                a({ href, children }) {
+                  if (!href) return <>{children}</>
+                  const ytMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/)
+                  if (ytMatch) {
+                    return (
+                      <div className="my-2">
+                        <iframe
+                          src={`https://www.youtube-nocookie.com/embed/${ytMatch[1]}`}
+                          className="w-full aspect-video rounded-[10px] border border-white/10"
+                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                          allowFullScreen
+                          title="YouTube video"
+                        />
+                      </div>
+                    )
+                  }
+                  return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                },
               }}
             >
               {rendered}

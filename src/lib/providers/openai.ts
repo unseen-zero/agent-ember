@@ -1,10 +1,32 @@
+import fs from 'fs'
 import https from 'https'
 import http from 'http'
 import type { StreamChatOptions } from './index'
 
-export function streamOpenAiChat({ session, message, apiKey, systemPrompt, write, active, loadHistory }: StreamChatOptions): Promise<string> {
+const IMAGE_EXTS = /\.(png|jpg|jpeg|gif|webp|bmp)$/i
+const TEXT_EXTS = /\.(txt|md|csv|json|xml|html|js|ts|tsx|jsx|py|go|rs|java|c|cpp|h|yml|yaml|toml|env|log|sh|sql|css|scss)$/i
+
+function fileToContentParts(filePath: string): any[] {
+  if (!filePath || !fs.existsSync(filePath)) return []
+  if (IMAGE_EXTS.test(filePath)) {
+    const data = fs.readFileSync(filePath).toString('base64')
+    const ext = filePath.split('.').pop()?.toLowerCase() || 'png'
+    const mimeType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
+    return [{ type: 'image_url', image_url: { url: `data:${mimeType};base64,${data}` } }]
+  }
+  if (TEXT_EXTS.test(filePath) || filePath.endsWith('.pdf')) {
+    try {
+      const text = fs.readFileSync(filePath, 'utf-8')
+      const name = filePath.split('/').pop() || 'file'
+      return [{ type: 'text', text: `[Attached file: ${name}]\n\n${text}` }]
+    } catch { return [] }
+  }
+  return [{ type: 'text', text: `[Attached file: ${filePath.split('/').pop()}]` }]
+}
+
+export function streamOpenAiChat({ session, message, imagePath, apiKey, systemPrompt, write, active, loadHistory }: StreamChatOptions): Promise<string> {
   return new Promise((resolve) => {
-    const messages = buildMessages(session, message, systemPrompt, loadHistory)
+    const messages = buildMessages(session, message, imagePath, systemPrompt, loadHistory)
     const model = session.model || 'gpt-4o'
 
     const payload = JSON.stringify({
@@ -90,8 +112,8 @@ export function streamOpenAiChat({ session, message, apiKey, systemPrompt, write
   })
 }
 
-function buildMessages(session: any, message: string, systemPrompt: string | undefined, loadHistory: (id: string) => any[]) {
-  const msgs: Array<{ role: string; content: string }> = []
+function buildMessages(session: any, message: string, imagePath: string | undefined, systemPrompt: string | undefined, loadHistory: (id: string) => any[]) {
+  const msgs: Array<{ role: string; content: any }> = []
 
   if (systemPrompt) {
     msgs.push({ role: 'system', content: systemPrompt })
@@ -100,10 +122,21 @@ function buildMessages(session: any, message: string, systemPrompt: string | und
   if (loadHistory) {
     const history = loadHistory(session.id)
     for (const m of history) {
-      msgs.push({ role: m.role, content: m.text })
+      if (m.role === 'user' && m.imagePath) {
+        const parts = fileToContentParts(m.imagePath)
+        msgs.push({ role: 'user', content: [...parts, { type: 'text', text: m.text }] })
+      } else {
+        msgs.push({ role: m.role, content: m.text })
+      }
     }
   }
 
-  msgs.push({ role: 'user', content: message })
+  // Current message with optional attachment
+  if (imagePath) {
+    const parts = fileToContentParts(imagePath)
+    msgs.push({ role: 'user', content: [...parts, { type: 'text', text: message }] })
+  } else {
+    msgs.push({ role: 'user', content: message })
+  }
   return msgs
 }

@@ -2,7 +2,6 @@
 
 import { useEffect } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
-import type { ProviderConfig } from '@/types'
 
 export function ProviderList({ inSidebar }: { inSidebar?: boolean }) {
   const providers = useAppStore((s) => s.providers)
@@ -54,10 +53,9 @@ export function ProviderList({ inSidebar }: { inSidebar?: boolean }) {
         {allItems.map((item) => (
           <button
             key={item.id}
-            onClick={() => item.type === 'custom' ? handleEdit(item.id) : undefined}
-            className={`w-full text-left p-4 rounded-[14px] border transition-all duration-200
-              ${item.type === 'custom' ? 'cursor-pointer hover:bg-surface-2' : 'cursor-default'}
-              bg-surface border-white/[0.06]`}
+            onClick={() => handleEdit(item.id)}
+            className="w-full text-left p-4 rounded-[14px] border transition-all duration-200
+              cursor-pointer hover:bg-surface-2 bg-surface border-white/[0.06]"
           >
             <div className="flex items-center justify-between mb-1.5">
               <span className="font-display text-[14px] font-600 text-text truncate">{item.name}</span>

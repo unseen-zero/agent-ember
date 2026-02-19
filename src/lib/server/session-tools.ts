@@ -3,9 +3,10 @@ import { tool, type StructuredToolInterface } from '@langchain/core/tools'
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import { execSync, execFile, spawn, type ChildProcess } from 'child_process'
+import { execSync, execFile } from 'child_process'
 import * as cheerio from 'cheerio'
 import { getMemoryDb } from './memory-db'
+import { loadRuntimeSettings } from './runtime-settings'
 import {
   loadAgents, saveAgents,
   loadTasks, saveTasks,
@@ -18,8 +19,6 @@ import {
 
 const MAX_OUTPUT = 50 * 1024 // 50KB
 const MAX_FILE = 100 * 1024 // 100KB
-const CMD_TIMEOUT = 30_000
-const CLAUDE_TIMEOUT = 120_000
 
 function safePath(cwd: string, filePath: string): string {
   const resolved = path.resolve(cwd, filePath)
@@ -32,6 +31,24 @@ function safePath(cwd: string, filePath: string): string {
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
   return text.slice(0, max) + `\n... [truncated at ${max} bytes]`
+}
+
+function decodeDuckDuckGoUrl(rawUrl: string): string {
+  if (!rawUrl) return rawUrl
+  try {
+    const url = rawUrl.startsWith('http')
+      ? new URL(rawUrl)
+      : new URL(rawUrl, 'https://duckduckgo.com')
+    const uddg = url.searchParams.get('uddg')
+    if (uddg) return decodeURIComponent(uddg)
+    return url.toString()
+  } catch {
+    const fromQuery = rawUrl.match(/[?&]uddg=([^&]+)/)?.[1]
+    if (fromQuery) {
+      try { return decodeURIComponent(fromQuery) } catch { /* noop */ }
+    }
+    return rawUrl
+  }
 }
 
 function listDirRecursive(dir: string, depth: number, maxDepth: number): string[] {
@@ -62,8 +79,55 @@ interface ToolContext {
   platformAssignScope?: 'self' | 'all'
 }
 
-export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: ToolContext): StructuredToolInterface[] {
+export interface SessionToolsResult {
+  tools: StructuredToolInterface[]
+  cleanup: () => Promise<void>
+}
+
+// Global registry of active browser instances for cleanup sweeps
+const activeBrowsers = new Map<string, { client: any; server: any; createdAt: number }>()
+
+/** Kill all browser instances that have been alive longer than maxAge (default 30 min) */
+export function sweepOrphanedBrowsers(maxAgeMs = 30 * 60 * 1000): number {
+  const now = Date.now()
+  let cleaned = 0
+  for (const [key, entry] of activeBrowsers) {
+    if (now - entry.createdAt > maxAgeMs) {
+      try { entry.client?.close?.() } catch { /* ignore */ }
+      try { entry.server?.close?.() } catch { /* ignore */ }
+      activeBrowsers.delete(key)
+      cleaned++
+    }
+  }
+  return cleaned
+}
+
+/** Kill a specific session's browser instance */
+export function cleanupSessionBrowser(sessionId: string): void {
+  const entry = activeBrowsers.get(sessionId)
+  if (entry) {
+    try { entry.client?.close?.() } catch { /* ignore */ }
+    try { entry.server?.close?.() } catch { /* ignore */ }
+    activeBrowsers.delete(sessionId)
+  }
+}
+
+/** Get count of active browser instances */
+export function getActiveBrowserCount(): number {
+  return activeBrowsers.size
+}
+
+/** Check if a specific session has an active browser */
+export function hasActiveBrowser(sessionId: string): boolean {
+  return activeBrowsers.has(sessionId)
+}
+
+export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: ToolContext): SessionToolsResult {
   const tools: StructuredToolInterface[] = []
+  const cleanupFns: (() => Promise<void>)[] = []
+  const runtime = loadRuntimeSettings()
+  const commandTimeoutMs = runtime.shellCommandTimeoutMs
+  const claudeTimeoutMs = runtime.claudeCodeTimeoutMs
 
   if (enabledTools.includes('shell')) {
     tools.push(
@@ -72,7 +136,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
           try {
             const output = execSync(command, {
               cwd,
-              timeout: CMD_TIMEOUT,
+              timeout: commandTimeoutMs,
               maxBuffer: MAX_OUTPUT * 2,
               encoding: 'utf-8',
               stdio: ['pipe', 'pipe', 'pipe'],
@@ -162,16 +226,67 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     )
   }
 
+  // send_file is always available when files tool is enabled — lets agents share any file with the user
+  if (enabledTools.includes('files')) {
+    tools.push(
+      tool(
+        async ({ filePath: rawPath }) => {
+          try {
+            // Resolve relative to cwd, but also allow absolute paths
+            const resolved = path.isAbsolute(rawPath) ? rawPath : path.resolve(cwd, rawPath)
+            if (!fs.existsSync(resolved)) return `Error: file not found: ${rawPath}`
+            const stat = fs.statSync(resolved)
+            if (stat.isDirectory()) return `Error: cannot send a directory. Send individual files instead.`
+            if (stat.size > 100 * 1024 * 1024) return `Error: file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB). Max 100MB.`
+
+            const ext = path.extname(resolved).slice(1).toLowerCase()
+            const basename = path.basename(resolved)
+            const filename = `${Date.now()}-${basename}`
+            const dest = path.join(UPLOAD_DIR, filename)
+            fs.copyFileSync(resolved, dest)
+
+            const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']
+            const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'avi', 'mkv']
+
+            if (IMAGE_EXTS.includes(ext)) {
+              return `![${basename}](/api/uploads/${filename})`
+            } else if (VIDEO_EXTS.includes(ext)) {
+              return `![${basename}](/api/uploads/${filename})`
+            } else {
+              return `[Download ${basename}](/api/uploads/${filename})`
+            }
+          } catch (err: any) {
+            return `Error sending file: ${err.message}`
+          }
+        },
+        {
+          name: 'send_file',
+          description: 'Send a file to the user so they can view or download it in the chat. Works with images, videos, PDFs, documents, and any other file type. The file will appear inline for images/videos, or as a download link for other types.',
+          schema: z.object({
+            filePath: z.string().describe('Path to the file (relative to working directory, or absolute)'),
+          }),
+        },
+      ),
+    )
+  }
+
   if (enabledTools.includes('claude_code')) {
     tools.push(
       tool(
         async ({ task }) => {
           try {
+            const env: NodeJS.ProcessEnv = { ...process.env }
+            // Running inside Claude environments can block nested `claude` launches.
+            // Clear these so delegation can run as an independent subprocess.
+            delete env.CLAUDECODE
+            delete env.CLAUDE_CODE_SESSION
+            delete env.CLAUDE_SESSION_ID
+
             return new Promise<string>((resolve) => {
               const child = execFile(
                 'claude',
                 ['-p', task, '--output-format', 'text'],
-                { cwd, timeout: CLAUDE_TIMEOUT, maxBuffer: MAX_OUTPUT * 2 },
+                { cwd, timeout: claudeTimeoutMs, maxBuffer: MAX_OUTPUT * 2, env, encoding: 'utf-8' },
                 (err, stdout, stderr) => {
                   if (err && !stdout) {
                     resolve(truncate(`Error: ${stderr || err.message}`, MAX_OUTPUT))
@@ -183,7 +298,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               // Kill on timeout safety net
               setTimeout(() => {
                 try { child.kill('SIGTERM') } catch { /* ignore */ }
-              }, CLAUDE_TIMEOUT + 5000)
+              }, claudeTimeoutMs + 5000)
             })
           } catch (err: any) {
             return `Error delegating to Claude Code: ${err.message}`
@@ -237,33 +352,48 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
         async ({ query, maxResults }) => {
           try {
             const limit = Math.min(maxResults || 5, 10)
-            const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
+            const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`
             const res = await fetch(url, {
               headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SwarmClaw/1.0)' },
+              signal: AbortSignal.timeout(15000),
             })
+            if (!res.ok) {
+              return `Error searching web: HTTP ${res.status} ${res.statusText}`
+            }
             const html = await res.text()
-            // Parse results from DuckDuckGo HTML
+            const $ = cheerio.load(html)
             const results: { title: string; url: string; snippet: string }[] = []
-            const resultRegex = /<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
-            let match
-            while ((match = resultRegex.exec(html)) !== null && results.length < limit) {
-              const rawUrl = match[1]
-              const title = match[2].replace(/<[^>]+>/g, '').trim()
-              const snippet = match[3].replace(/<[^>]+>/g, '').trim()
-              // DuckDuckGo wraps URLs in a redirect
-              const decoded = decodeURIComponent(rawUrl.replace(/.*uddg=/, '').replace(/&.*/, ''))
-              results.push({ title, url: decoded || rawUrl, snippet })
-            }
+
+            // Primary parser: DuckDuckGo result cards
+            $('.result').each((_i, el) => {
+              if (results.length >= limit) return false
+              const link = $(el).find('a.result__a').first()
+              const rawHref = link.attr('href') || ''
+              const title = link.text().replace(/\s+/g, ' ').trim()
+              if (!rawHref || !title) return
+              const snippet = $(el).find('.result__snippet').first().text().replace(/\s+/g, ' ').trim()
+              results.push({
+                title,
+                url: decodeDuckDuckGoUrl(rawHref),
+                snippet,
+              })
+            })
+
+            // Fallback parser: any result__a anchors
             if (results.length === 0) {
-              // Fallback: try simpler regex
-              const linkRegex = /<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g
-              while ((match = linkRegex.exec(html)) !== null && results.length < limit) {
-                const rawUrl = match[1]
-                const title = match[2].replace(/<[^>]+>/g, '').trim()
-                const decoded = decodeURIComponent(rawUrl.replace(/.*uddg=/, '').replace(/&.*/, ''))
-                results.push({ title, url: decoded || rawUrl, snippet: '' })
-              }
+              $('a.result__a').each((_i, el) => {
+                if (results.length >= limit) return false
+                const rawHref = $(el).attr('href') || ''
+                const title = $(el).text().replace(/\s+/g, ' ').trim()
+                if (!rawHref || !title) return
+                results.push({
+                  title,
+                  url: decodeDuckDuckGoUrl(rawHref),
+                  snippet: '',
+                })
+              })
             }
+
             return results.length > 0
               ? JSON.stringify(results, null, 2)
               : 'No results found.'
@@ -319,213 +449,179 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
   }
 
   if (enabledTools.includes('browser')) {
-    // Lightweight MCP client wrapper for Playwright browser
-    let mcpProcess: ChildProcess | null = null
-    let mcpReqId = 1
-    let pendingCallbacks = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>()
-    let initialized = false
-    let mcpBuf = ''
+    // In-process Playwright MCP client via @playwright/mcp programmatic API
+    const sessionKey = ctx?.sessionId || `anon-${Date.now()}`
+    let mcpClient: any = null
+    let mcpServer: any = null
+    let mcpInitializing: Promise<void> | null = null
 
     const ensureMcp = (): Promise<void> => {
-      if (initialized && mcpProcess && !mcpProcess.killed) return Promise.resolve()
-      return new Promise((resolve, reject) => {
-        try {
-          mcpProcess = spawn('npx', ['@playwright/mcp@latest'], {
-            stdio: ['pipe', 'pipe', 'pipe'],
-            cwd,
-          })
+      if (mcpClient) return Promise.resolve()
+      if (mcpInitializing) return mcpInitializing
+      mcpInitializing = (async () => {
+        const { createConnection } = await import('@playwright/mcp')
+        const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+        const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js')
 
-          mcpProcess.stdout!.on('data', (chunk: Buffer) => {
-            mcpBuf += chunk.toString()
-            // MCP uses content-length framing
-            while (true) {
-              const headerEnd = mcpBuf.indexOf('\r\n\r\n')
-              if (headerEnd === -1) break
-              const header = mcpBuf.slice(0, headerEnd)
-              const lengthMatch = header.match(/Content-Length:\s*(\d+)/i)
-              if (!lengthMatch) { mcpBuf = mcpBuf.slice(headerEnd + 4); continue }
-              const contentLength = parseInt(lengthMatch[1])
-              const bodyStart = headerEnd + 4
-              if (mcpBuf.length < bodyStart + contentLength) break
-              const body = mcpBuf.slice(bodyStart, bodyStart + contentLength)
-              mcpBuf = mcpBuf.slice(bodyStart + contentLength)
-              try {
-                const msg = JSON.parse(body)
-                if (msg.id !== undefined && pendingCallbacks.has(msg.id)) {
-                  const cb = pendingCallbacks.get(msg.id)!
-                  pendingCallbacks.delete(msg.id)
-                  if (msg.error) cb.reject(new Error(msg.error.message || JSON.stringify(msg.error)))
-                  else cb.resolve(msg.result)
-                }
-              } catch { /* ignore parse errors */ }
-            }
-          })
+        const server = await createConnection({
+          browser: {
+            launchOptions: { headless: true },
+            isolated: true,
+          },
+          imageResponses: 'allow',
+          capabilities: ['core', 'pdf', 'vision', 'network'],
+        })
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+        const client = new Client({ name: 'swarmclaw', version: '1.0' })
+        await Promise.all([
+          client.connect(clientTransport),
+          server.connect(serverTransport),
+        ])
+        mcpClient = client
+        mcpServer = server
+        // Register in global tracker
+        activeBrowsers.set(sessionKey, { client, server, createdAt: Date.now() })
+      })()
+      return mcpInitializing
+    }
 
-          mcpProcess.on('error', (err) => {
-            console.error('[mcp-browser] Process error:', err.message)
-            initialized = false
-          })
+    // Register cleanup for this session's browser
+    cleanupFns.push(async () => {
+      try { mcpClient?.close?.() } catch { /* ignore */ }
+      try { mcpServer?.close?.() } catch { /* ignore */ }
+      activeBrowsers.delete(sessionKey)
+      mcpClient = null
+      mcpServer = null
+    })
 
-          mcpProcess.on('close', () => {
-            initialized = false
-            mcpProcess = null
-          })
-
-          // Send initialize
-          const initId = mcpReqId++
-          const initMsg = JSON.stringify({ jsonrpc: '2.0', id: initId, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'swarmclaw', version: '1.0' } } })
-          const initFrame = `Content-Length: ${Buffer.byteLength(initMsg)}\r\n\r\n${initMsg}`
-          mcpProcess.stdin!.write(initFrame)
-
-          pendingCallbacks.set(initId, {
-            resolve: () => {
-              // Send initialized notification
-              const notifMsg = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
-              const notifFrame = `Content-Length: ${Buffer.byteLength(notifMsg)}\r\n\r\n${notifMsg}`
-              mcpProcess!.stdin!.write(notifFrame)
-              initialized = true
-              resolve()
-            },
-            reject,
-          })
-
-          // Timeout
-          setTimeout(() => {
-            if (!initialized) reject(new Error('MCP browser init timeout'))
-          }, 15000)
-        } catch (err: any) {
-          reject(err)
+    /** Strip Playwright debug noise — keep page context for the LLM */
+    const cleanPlaywrightOutput = (text: string): string => {
+      // Remove "### Ran Playwright code" blocks (internal debug)
+      text = text.replace(/### Ran Playwright code[\s\S]*?(?=###|$)/g, '')
+      // Truncate snapshot to first 40 lines so LLM has page context without flooding
+      text = text.replace(/### Snapshot\n([\s\S]*?)(?=###|$)/g, (_match, snapshot) => {
+        const lines = (snapshot as string).split('\n')
+        if (lines.length > 40) {
+          return 'Page elements:\n' + lines.slice(0, 40).join('\n') + '\n... (truncated)\n'
         }
+        return 'Page elements:\n' + snapshot
       })
+      // Clean headers
+      text = text.replace(/^### Result\n/gm, '')
+      text = text.replace(/^### Page\n/gm, '')
+      return text.replace(/\n{3,}/g, '\n').trim()
     }
 
     const callMcpTool = async (toolName: string, args: Record<string, any>): Promise<string> => {
       await ensureMcp()
-      if (!mcpProcess || mcpProcess.killed) throw new Error('MCP browser process not running')
-      return new Promise((resolve, reject) => {
-        const id = mcpReqId++
-        const msg = JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: toolName, arguments: args } })
-        const frame = `Content-Length: ${Buffer.byteLength(msg)}\r\n\r\n${msg}`
-        pendingCallbacks.set(id, {
-          resolve: (result: any) => {
-            const content = result?.content
-            if (Array.isArray(content)) {
-              const parts: string[] = []
-              for (const c of content) {
-                if (c.type === 'image' && c.data) {
-                  const filename = `screenshot-${Date.now()}.png`
-                  const filepath = path.join(UPLOAD_DIR, filename)
-                  fs.writeFileSync(filepath, Buffer.from(c.data, 'base64'))
-                  parts.push(`![Screenshot](/api/uploads/${filename})`)
+      const result = await mcpClient.callTool({ name: toolName, arguments: args })
+      const isError = result?.isError === true
+      const content = result?.content
+      if (Array.isArray(content)) {
+        const parts: string[] = []
+        let hasBinaryImage = false
+        for (const c of content) {
+          if (c.type === 'image' && c.data) {
+            hasBinaryImage = true
+            const filename = `screenshot-${Date.now()}.png`
+            const filepath = path.join(UPLOAD_DIR, filename)
+            fs.writeFileSync(filepath, Buffer.from(c.data, 'base64'))
+            parts.push(`![Screenshot](/api/uploads/${filename})`)
+          } else if (c.type === 'resource' && c.resource?.blob) {
+            const ext = c.resource.mimeType?.includes('pdf') ? 'pdf' : 'bin'
+            const filename = `browser-${Date.now()}.${ext}`
+            const filepath = path.join(UPLOAD_DIR, filename)
+            fs.writeFileSync(filepath, Buffer.from(c.resource.blob, 'base64'))
+            parts.push(`[Download ${filename}](/api/uploads/${filename})`)
+          } else {
+            let text = c.text || ''
+            // Detect file paths in output (e.g. PDF save returns a local path)
+            const fileMatch = text.match(/\]\((\.\.\/[^\s)]+|\/[^\s)]+\.(pdf|png|jpg|jpeg|gif|webp|html|mp4|webm))\)/)
+            if (fileMatch) {
+              const rawPath = fileMatch[1]
+              const srcPath = rawPath.startsWith('/') ? rawPath : path.resolve(process.cwd(), rawPath)
+              if (fs.existsSync(srcPath)) {
+                const ext = path.extname(srcPath).slice(1).toLowerCase()
+                const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp']
+                // Skip file-path images if we already have a binary image (avoids duplicates)
+                if (IMAGE_EXTS.includes(ext) && hasBinaryImage) {
+                  parts.push(isError ? text : cleanPlaywrightOutput(text))
                 } else {
-                  parts.push(c.text || '')
+                  const filename = `browser-${Date.now()}.${ext}`
+                  const destPath = path.join(UPLOAD_DIR, filename)
+                  fs.copyFileSync(srcPath, destPath)
+                  if (IMAGE_EXTS.includes(ext)) {
+                    parts.push(`![Screenshot](/api/uploads/${filename})`)
+                  } else {
+                    parts.push(`[Download ${filename}](/api/uploads/${filename})`)
+                  }
                 }
+              } else {
+                parts.push(isError ? text : cleanPlaywrightOutput(text))
               }
-              resolve(parts.join('\n'))
             } else {
-              resolve(JSON.stringify(result))
+              parts.push(isError ? text : cleanPlaywrightOutput(text))
             }
-          },
-          reject,
-        })
-        mcpProcess!.stdin!.write(frame)
-        setTimeout(() => {
-          if (pendingCallbacks.has(id)) {
-            pendingCallbacks.delete(id)
-            reject(new Error(`MCP tool call timeout: ${toolName}`))
           }
-        }, 30000)
-      })
+        }
+        return parts.join('\n')
+      }
+      return JSON.stringify(result)
+    }
+
+    // Action-to-MCP tool mapping
+    const MCP_TOOL_MAP: Record<string, string> = {
+      navigate: 'browser_navigate',
+      screenshot: 'browser_take_screenshot',
+      snapshot: 'browser_snapshot',
+      click: 'browser_click',
+      type: 'browser_type',
+      press_key: 'browser_press_key',
+      select: 'browser_select_option',
+      evaluate: 'browser_evaluate',
+      pdf: 'browser_pdf_save',
+      upload: 'browser_file_upload',
+      wait: 'browser_wait_for',
     }
 
     tools.push(
       tool(
-        async ({ url }) => {
+        async (params) => {
           try {
-            return await callMcpTool('browser_navigate', { url })
+            const { action, ...rest } = params
+            // Build MCP args based on action
+            const mcpTool = MCP_TOOL_MAP[action]
+            if (!mcpTool) return `Unknown browser action: "${action}". Valid: ${Object.keys(MCP_TOOL_MAP).join(', ')}`
+            // Pass only defined (non-undefined) params to MCP
+            const args: Record<string, any> = {}
+            for (const [k, v] of Object.entries(rest)) {
+              if (v !== undefined && v !== null && v !== '') args[k] = v
+            }
+            return await callMcpTool(mcpTool, args)
           } catch (err: any) {
             return `Error: ${err.message}`
           }
         },
         {
-          name: 'browser_navigate',
-          description: 'Navigate the browser to a URL.',
-          schema: z.object({ url: z.string().describe('The URL to navigate to') }),
-        },
-      ),
-    )
-
-    tools.push(
-      tool(
-        async () => {
-          try {
-            return await callMcpTool('browser_screenshot', {})
-          } catch (err: any) {
-            return `Error: ${err.message}`
-          }
-        },
-        {
-          name: 'browser_screenshot',
-          description: 'Take a screenshot of the current page. Returns base64-encoded image data.',
-          schema: z.object({}),
-        },
-      ),
-    )
-
-    tools.push(
-      tool(
-        async ({ element, ref }) => {
-          try {
-            return await callMcpTool('browser_click', { element, ref })
-          } catch (err: any) {
-            return `Error: ${err.message}`
-          }
-        },
-        {
-          name: 'browser_click',
-          description: 'Click on an element in the browser. Provide either a CSS selector or a ref from a previous snapshot.',
+          name: 'browser',
+          description: [
+            'Control the browser. Use action to specify what to do.',
+            'Actions: navigate (url), screenshot, snapshot (get page elements), click (element/ref), type (element/ref, text), press_key (key), select (element/ref, option), evaluate (expression), pdf, upload (paths, ref), wait (text/timeout).',
+            'Workflow: use snapshot to see the page and get element refs, then use click/type/select with those refs.',
+            'Screenshots are returned as images visible to the user.',
+          ].join(' '),
           schema: z.object({
-            element: z.string().optional().describe('CSS selector or description of the element to click'),
-            ref: z.string().optional().describe('Element reference from a previous snapshot'),
+            action: z.enum(['navigate', 'screenshot', 'snapshot', 'click', 'type', 'press_key', 'select', 'evaluate', 'pdf', 'upload', 'wait']).describe('The browser action to perform'),
+            url: z.string().optional().describe('URL to navigate to (for navigate action)'),
+            element: z.string().optional().describe('CSS selector or description of an element (for click/type/select)'),
+            ref: z.string().optional().describe('Element reference from a previous snapshot (for click/type/select/upload)'),
+            text: z.string().optional().describe('Text to type (for type action) or text to wait for (for wait action)'),
+            key: z.string().optional().describe('Key to press, e.g. Enter, Tab, Escape (for press_key action)'),
+            option: z.string().optional().describe('Option value or label to select (for select action)'),
+            expression: z.string().optional().describe('JavaScript expression to evaluate (for evaluate action)'),
+            paths: z.array(z.string()).optional().describe('File paths to upload (for upload action)'),
+            timeout: z.number().optional().describe('Timeout in milliseconds (for wait action, default 30000)'),
           }),
-        },
-      ),
-    )
-
-    tools.push(
-      tool(
-        async ({ element, ref, text }) => {
-          try {
-            return await callMcpTool('browser_type', { element, ref, text })
-          } catch (err: any) {
-            return `Error: ${err.message}`
-          }
-        },
-        {
-          name: 'browser_type',
-          description: 'Type text into an input element in the browser.',
-          schema: z.object({
-            element: z.string().optional().describe('CSS selector or description of the input'),
-            ref: z.string().optional().describe('Element reference from a previous snapshot'),
-            text: z.string().describe('Text to type'),
-          }),
-        },
-      ),
-    )
-
-    tools.push(
-      tool(
-        async () => {
-          try {
-            return await callMcpTool('browser_snapshot', {})
-          } catch (err: any) {
-            return `Error: ${err.message}`
-          }
-        },
-        {
-          name: 'browser_get_text',
-          description: 'Get an accessibility snapshot of the current page, including all visible text and interactive elements.',
-          schema: z.object({}),
         },
       ),
     )
@@ -770,5 +866,12 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     )
   }
 
-  return tools
+  return {
+    tools,
+    cleanup: async () => {
+      for (const fn of cleanupFns) {
+        try { await fn() } catch { /* ignore */ }
+      }
+    },
+  }
 }

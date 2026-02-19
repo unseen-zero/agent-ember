@@ -8,6 +8,7 @@ import { BottomSheet } from '@/components/shared/bottom-sheet'
 export function MemorySheet() {
   const open = useAppStore((s) => s.memorySheetOpen)
   const setOpen = useAppStore((s) => s.setMemorySheetOpen)
+  const triggerRefresh = useAppStore((s) => s.triggerMemoryRefresh)
 
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
@@ -26,6 +27,7 @@ export function MemorySheet() {
       agentId: null,
       sessionId: null,
     })
+    triggerRefresh()
     onClose()
   }
 

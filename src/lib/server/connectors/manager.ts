@@ -7,8 +7,17 @@ import { streamAgentChat } from '../stream-agent-chat'
 import type { Connector } from '@/types'
 import type { ConnectorInstance, InboundMessage } from './types'
 
-/** Map of running connector instances by connector ID */
-const running = new Map<string, ConnectorInstance>()
+/** Map of running connector instances by connector ID.
+ *  Stored on globalThis to survive HMR reloads in dev mode —
+ *  prevents duplicate sockets fighting for the same WhatsApp session. */
+const globalKey = '__swarmclaw_running_connectors__' as const
+const running: Map<string, ConnectorInstance> =
+  (globalThis as any)[globalKey] ?? ((globalThis as any)[globalKey] = new Map<string, ConnectorInstance>())
+
+/** Per-connector lock to prevent concurrent start/stop operations */
+const lockKey = '__swarmclaw_connector_locks__' as const
+const locks: Map<string, Promise<void>> =
+  (globalThis as any)[lockKey] ?? ((globalThis as any)[lockKey] = new Map<string, Promise<void>>())
 
 /** Get platform implementation lazily */
 async function getPlatform(platform: string) {
@@ -95,16 +104,23 @@ async function routeMessage(connector: Connector, msg: InboundMessage): Promise<
   // Stream the response
   let fullText = ''
   const hasTools = session.tools?.length && session.provider !== 'claude-cli'
+  console.log(`[connector] Routing message to agent "${agent.name}" (${agent.provider}/${agent.model}), hasTools=${!!hasTools}`)
 
   if (hasTools) {
-    fullText = await streamAgentChat({
-      session,
-      message: msg.text,
-      apiKey,
-      systemPrompt,
-      write: () => {},  // no SSE needed for connectors
-      history: session.messages,
-    })
+    try {
+      fullText = await streamAgentChat({
+        session,
+        message: msg.text,
+        apiKey,
+        systemPrompt,
+        write: () => {},  // no SSE needed for connectors
+        history: session.messages,
+      })
+      console.log(`[connector] streamAgentChat returned ${fullText.length} chars`)
+    } catch (err: any) {
+      console.error(`[connector] streamAgentChat error:`, err.message || err)
+      return `[Error] ${err.message}`
+    }
   } else {
     // Use the provider directly
     const { getProvider } = await import('../../providers')
@@ -142,10 +158,37 @@ async function routeMessage(connector: Connector, msg: InboundMessage): Promise<
   return fullText || '(no response)'
 }
 
-/** Start a connector */
+/** Start a connector (serialized per ID to prevent concurrent start/stop races) */
 export async function startConnector(connectorId: string): Promise<void> {
+  // Wait for any pending operation on this connector to finish (with timeout)
+  const pending = locks.get(connectorId)
+  if (pending) {
+    await Promise.race([pending, new Promise(r => setTimeout(r, 15_000))]).catch(() => {})
+    locks.delete(connectorId)
+  }
+
+  const op = withTimeout(_startConnectorImpl(connectorId), 30_000, 'Connector start timed out')
+  locks.set(connectorId, op)
+  try { await op } finally {
+    if (locks.get(connectorId) === op) locks.delete(connectorId)
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, msg: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(msg)), ms)
+    promise.then(resolve, reject).finally(() => clearTimeout(timer))
+  })
+}
+
+async function _startConnectorImpl(connectorId: string): Promise<void> {
+  // If already running, stop it first (handles stale entries)
   if (running.has(connectorId)) {
-    throw new Error('Connector is already running')
+    try {
+      const existing = running.get(connectorId)
+      await existing?.stop()
+    } catch { /* ignore cleanup errors */ }
+    running.delete(connectorId)
   }
 
   const connectors = loadConnectors()
@@ -178,6 +221,7 @@ export async function startConnector(connectorId: string): Promise<void> {
 
     // Update status in storage
     connector.status = 'running'
+    connector.isEnabled = true
     connector.lastError = null
     connector.updatedAt = Date.now()
     connectors[connectorId] = connector
@@ -186,6 +230,7 @@ export async function startConnector(connectorId: string): Promise<void> {
     console.log(`[connector] Started ${connector.platform} connector: ${connector.name}`)
   } catch (err: any) {
     connector.status = 'error'
+    connector.isEnabled = false
     connector.lastError = err.message
     connector.updatedAt = Date.now()
     connectors[connectorId] = connector
@@ -206,6 +251,8 @@ export async function stopConnector(connectorId: string): Promise<void> {
   const connector = connectors[connectorId]
   if (connector) {
     connector.status = 'stopped'
+    connector.isEnabled = false
+    connector.lastError = null
     connector.updatedAt = Date.now()
     connectors[connectorId] = connector
     saveConnectors(connectors)
@@ -225,6 +272,37 @@ export function getConnectorQR(connectorId: string): string | null {
   return instance?.qrDataUrl ?? null
 }
 
+/** Check if a WhatsApp connector has authenticated (paired) */
+export function isConnectorAuthenticated(connectorId: string): boolean {
+  const instance = running.get(connectorId)
+  if (!instance) return false
+  return instance.authenticated === true
+}
+
+/** Check if a WhatsApp connector has stored credentials */
+export function hasConnectorCredentials(connectorId: string): boolean {
+  const instance = running.get(connectorId)
+  if (!instance) return false
+  return instance.hasCredentials === true
+}
+
+/** Clear WhatsApp auth state and restart connector for fresh QR pairing */
+export async function repairConnector(connectorId: string): Promise<void> {
+  // Stop existing instance
+  const instance = running.get(connectorId)
+  if (instance) {
+    await instance.stop()
+    running.delete(connectorId)
+  }
+
+  // Clear auth directory
+  const { clearAuthDir } = await import('./whatsapp')
+  clearAuthDir(connectorId)
+
+  // Restart the connector — will get fresh QR
+  await startConnector(connectorId)
+}
+
 /** Stop all running connectors (for cleanup) */
 export async function stopAllConnectors(): Promise<void> {
   for (const [id] of running) {
@@ -232,12 +310,13 @@ export async function stopAllConnectors(): Promise<void> {
   }
 }
 
-/** Auto-start connectors that are marked as enabled */
+/** Auto-start connectors that are marked as enabled (skips already-running ones) */
 export async function autoStartConnectors(): Promise<void> {
   const connectors = loadConnectors()
   for (const connector of Object.values(connectors) as Connector[]) {
-    if (connector.isEnabled) {
+    if (connector.isEnabled && !running.has(connector.id)) {
       try {
+        console.log(`[connector] Auto-starting ${connector.platform} connector: ${connector.name}`)
         await startConnector(connector.id)
       } catch (err: any) {
         console.error(`[connector] Failed to auto-start ${connector.name}:`, err.message)

@@ -13,6 +13,7 @@ import { ScheduleList } from '@/components/schedules/schedule-list'
 import { ScheduleSheet } from '@/components/schedules/schedule-sheet'
 import { MemoryList } from '@/components/memory/memory-list'
 import { MemorySheet } from '@/components/memory/memory-sheet'
+import { MemoryDetail } from '@/components/memory/memory-detail'
 import { TaskList } from '@/components/tasks/task-list'
 import { TaskSheet } from '@/components/tasks/task-sheet'
 import { TaskBoard } from '@/components/tasks/task-board'
@@ -24,6 +25,7 @@ import { SkillList } from '@/components/skills/skill-list'
 import { SkillSheet } from '@/components/skills/skill-sheet'
 import { ConnectorList } from '@/components/connectors/connector-list'
 import { ConnectorSheet } from '@/components/connectors/connector-sheet'
+import { LogList } from '@/components/logs/log-list'
 import { NetworkBanner } from './network-banner'
 import { UpdateBanner } from './update-banner'
 import { MobileHeader } from './mobile-header'
@@ -36,6 +38,7 @@ const RAIL_EXPANDED_KEY = 'sc_rail_expanded'
 
 export function AppLayout() {
   const currentUser = useAppStore((s) => s.currentUser)
+  const sessions = useAppStore((s) => s.sessions)
   const currentSessionId = useAppStore((s) => s.currentSessionId)
   const sidebarOpen = useAppStore((s) => s.sidebarOpen)
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen)
@@ -81,6 +84,14 @@ export function AppLayout() {
     else if (activeView === 'providers') setProviderSheetOpen(true)
     else if (activeView === 'skills') setSkillSheetOpen(true)
     else if (activeView === 'connectors') setConnectorSheetOpen(true)
+  }
+
+  const mainSession = Object.values(sessions).find((s: any) => s.name === '__main__' && s.user === currentUser)
+
+  const goToMainChat = () => {
+    if (mainSession) setCurrentSession(mainSession.id)
+    setActiveView('sessions')
+    setSidebarOpen(false)
   }
 
   return (
@@ -129,28 +140,31 @@ export function AppLayout() {
             </div>
           )}
 
-          {/* New button */}
+          {/* Main Chat shortcut */}
           {railExpanded ? (
             <div className="px-3 mb-2">
               <button
-                onClick={openNewSheet}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-[13px] font-600 cursor-pointer transition-all
-                  bg-[#6366F1]/10 border border-[#6366F1]/20 text-accent-bright hover:bg-[#6366F1]/15"
+                onClick={goToMainChat}
+                className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-[13px] font-600 cursor-pointer transition-all
+                  ${mainSession && currentSessionId === mainSession.id && activeView === 'sessions'
+                    ? 'bg-[#6366F1]/15 border border-[#6366F1]/25 text-accent-bright'
+                    : 'bg-[#6366F1]/10 border border-[#6366F1]/20 text-accent-bright hover:bg-[#6366F1]/15'}`}
                 style={{ fontFamily: 'inherit' }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
-                New
+                Main Chat
               </button>
             </div>
           ) : (
-            <RailTooltip label="New" description="Create a new item">
-              <button onClick={openNewSheet} className="rail-btn self-center">
+            <RailTooltip label="Main Chat" description="Your persistent assistant chat">
+              <button
+                onClick={goToMainChat}
+                className={`rail-btn self-center mb-2 ${mainSession && currentSessionId === mainSession.id && activeView === 'sessions' ? 'active' : ''}`}
+              >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </button>
             </RailTooltip>
@@ -203,12 +217,48 @@ export function AppLayout() {
                 <path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" />
               </svg>
             </NavItem>
+            <NavItem view="logs" label="Logs" expanded={railExpanded} active={activeView} sidebarOpen={sidebarOpen} onClick={() => { setActiveView('logs'); setSidebarOpen(true) }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
+              </svg>
+            </NavItem>
           </div>
 
           <div className="flex-1" />
 
-          {/* Bottom: Daemon + Settings + User */}
+          {/* Bottom: Docs + Daemon + Settings + User */}
           <div className={`flex flex-col gap-1 ${railExpanded ? 'px-3' : 'items-center'}`}>
+            {railExpanded ? (
+              <a
+                href="https://swarmclaw.ai/docs"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-[13px] font-500 cursor-pointer transition-all
+                  bg-transparent text-text-3 hover:text-text hover:bg-white/[0.04] no-underline"
+                style={{ fontFamily: 'inherit' }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0">
+                  <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                </svg>
+                Docs
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="ml-auto opacity-40">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
+              </a>
+            ) : (
+              <RailTooltip label="Docs" description="Open documentation site">
+                <a
+                  href="https://swarmclaw.ai/docs"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rail-btn"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                  </svg>
+                </a>
+              </RailTooltip>
+            )}
             {railExpanded && <DaemonIndicator />}
             {railExpanded ? (
               <button
@@ -263,16 +313,28 @@ export function AppLayout() {
         >
           <div className="flex items-center px-5 pt-5 pb-3 shrink-0">
             <h2 className="font-display text-[14px] font-600 text-text-2 tracking-[-0.01em] capitalize flex-1">{activeView}</h2>
-            {activeView !== 'memory' && (
+            {activeView === 'logs' ? null : activeView === 'memory' ? (
+              <button
+                onClick={() => useAppStore.getState().setMemorySheetOpen(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] text-[11px] font-600 text-accent-bright bg-accent-soft hover:bg-[#6366F1]/15 transition-all cursor-pointer"
+                style={{ fontFamily: 'inherit' }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                Memory
+              </button>
+            ) : (
               <button
                 onClick={openNewSheet}
-                className="w-7 h-7 rounded-[8px] flex items-center justify-center text-text-3 hover:text-text hover:bg-white/[0.04] transition-all cursor-pointer"
-                title={`New ${activeView.slice(0, -1)}`}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] text-[11px] font-600 text-accent-bright bg-accent-soft hover:bg-[#6366F1]/15 transition-all cursor-pointer"
+                style={{ fontFamily: 'inherit' }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
+                {activeView === 'sessions' ? 'Session' : activeView === 'agents' ? 'Agent' : activeView === 'schedules' ? 'Schedule' : activeView === 'tasks' ? 'Task' : activeView === 'secrets' ? 'Secret' : activeView === 'providers' ? 'Provider' : activeView === 'skills' ? 'Skill' : activeView === 'connectors' ? 'Connector' : 'New'}
               </button>
             )}
           </div>
@@ -291,6 +353,7 @@ export function AppLayout() {
           {activeView === 'providers' && <ProviderList inSidebar />}
           {activeView === 'skills' && <SkillList inSidebar />}
           {activeView === 'connectors' && <ConnectorList inSidebar />}
+          {activeView === 'logs' && <LogList />}
         </div>
       )}
 
@@ -310,6 +373,11 @@ export function AppLayout() {
                 </svg>
               </div>
               <span className="font-display text-[15px] font-600 flex-1 tracking-[-0.02em]">SwarmClaw</span>
+              <a href="https://swarmclaw.ai/docs" target="_blank" rel="noopener noreferrer" className="rail-btn" title="Documentation">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                </svg>
+              </a>
               <button onClick={() => setSettingsOpen(true)} className="rail-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <circle cx="12" cy="12" r="3" />
@@ -322,7 +390,7 @@ export function AppLayout() {
             </div>
             {/* View selector tabs */}
             <div className="flex px-4 py-2 gap-1 shrink-0 flex-wrap">
-              {(['sessions', 'agents', 'schedules', 'memory', 'tasks', 'secrets', 'providers', 'skills', 'connectors'] as AppView[]).map((v) => (
+              {(['sessions', 'agents', 'schedules', 'memory', 'tasks', 'secrets', 'providers', 'skills', 'connectors', 'logs'] as AppView[]).map((v) => (
                 <button
                   key={v}
                   onClick={() => setActiveView(v)}
@@ -365,6 +433,7 @@ export function AppLayout() {
             {activeView === 'providers' && <ProviderList inSidebar />}
             {activeView === 'skills' && <SkillList inSidebar />}
             {activeView === 'connectors' && <ConnectorList inSidebar />}
+            {activeView === 'logs' && <LogList />}
           </div>
         </div>
       )}
@@ -376,14 +445,12 @@ export function AppLayout() {
           <ChatArea />
         ) : activeView === 'sessions' ? (
           <div className="flex-1 flex flex-col">
-            {isDesktop ? (
-              <DesktopEmptyState userName={currentUser} />
-            ) : (
-              <SessionList />
-            )}
+            {!isDesktop && <SessionList />}
           </div>
         ) : activeView === 'tasks' && isDesktop ? (
           <TaskBoard />
+        ) : activeView === 'memory' ? (
+          <MemoryDetail />
         ) : (
           <ViewEmptyState view={activeView} />
         )}
@@ -413,6 +480,7 @@ const VIEW_DESCRIPTIONS: Record<AppView, string> = {
   providers: 'LLM providers & custom endpoints',
   skills: 'Reusable instruction sets for agents',
   connectors: 'Chat platform bridges (Discord, Slack, etc.)',
+  logs: 'Application logs & error tracking',
 }
 
 const VIEW_EMPTY_STATES: Record<Exclude<AppView, 'sessions'>, { icon: string; title: string; description: string; features: string[] }> = {
@@ -463,6 +531,12 @@ const VIEW_EMPTY_STATES: Record<Exclude<AppView, 'sessions'>, { icon: string; ti
     title: 'Connectors',
     description: 'Bridge chat platforms to your AI agents. Receive messages from Discord, Telegram, Slack, or WhatsApp and route them to agents.',
     features: ['Connect Discord, Telegram, Slack, or WhatsApp bots', 'Route incoming messages to any agent', 'Each platform channel gets its own session', 'Start and stop connectors from the UI'],
+  },
+  logs: {
+    icon: 'file-text',
+    title: 'Logs',
+    description: 'View application logs, errors, and debug information. Logs auto-refresh in real-time.',
+    features: ['Filter by level: ERROR, WARN, INFO, DEBUG', 'Search through log entries', 'Auto-refresh with live mode', 'Click entries to expand details'],
   },
 }
 

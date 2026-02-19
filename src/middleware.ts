@@ -8,8 +8,8 @@ import type { NextRequest } from 'next/server'
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  // Only protect API routes (not the auth endpoint itself or static assets)
-  if (!pathname.startsWith('/api/') || pathname === '/api/auth') {
+  // Only protect API routes (not auth, uploads served as static assets)
+  if (!pathname.startsWith('/api/') || pathname === '/api/auth' || pathname.startsWith('/api/uploads/')) {
     return NextResponse.next()
   }
 

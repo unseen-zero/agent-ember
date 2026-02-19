@@ -15,7 +15,11 @@ export default function Home() {
   const hydrated = useAppStore((s) => s._hydrated)
   const hydrate = useAppStore((s) => s.hydrate)
   const loadNetworkInfo = useAppStore((s) => s.loadNetworkInfo)
+  const sessions = useAppStore((s) => s.sessions)
+  const currentSessionId = useAppStore((s) => s.currentSessionId)
+  const setCurrentSession = useAppStore((s) => s.setCurrentSession)
   const loadSessions = useAppStore((s) => s.loadSessions)
+  const loadSettings = useAppStore((s) => s.loadSettings)
 
   const [authChecked, setAuthChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
@@ -70,10 +74,41 @@ export default function Home() {
     if (!authenticated) return
     syncUserFromServer()
     loadNetworkInfo()
+    loadSettings()
     loadSessions()
     const interval = setInterval(loadSessions, 5000)
     return () => clearInterval(interval)
   }, [authenticated])
+
+  // Auto-create and select main chat session
+  useEffect(() => {
+    if (!authenticated || !currentUser) return
+    const sessionList = Object.values(sessions)
+    if (!sessionList.length) return // sessions not loaded yet
+    const mainSession = sessionList.find((s: any) => s.name === '__main__' && s.user === currentUser)
+    if (mainSession) {
+      if (!currentSessionId) setCurrentSession(mainSession.id)
+      return
+    }
+    // Create the main chat session
+    let cancelled = false
+    ;(async () => {
+      try {
+        const mainId = `main-${currentUser}`
+        const res = await api<any>('POST', '/sessions', {
+          id: mainId,
+          name: '__main__',
+          user: currentUser,
+          agentId: 'default',
+        })
+        if (!cancelled) {
+          await loadSessions()
+          if (!currentSessionId) setCurrentSession(res.id)
+        }
+      } catch { /* ignore — will retry on next load */ }
+    })()
+    return () => { cancelled = true }
+  }, [authenticated, currentUser, sessions])
 
   // Check if first-run setup is needed
   useEffect(() => {

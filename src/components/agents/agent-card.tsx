@@ -8,9 +8,11 @@ import { api } from '@/lib/api-client'
 
 interface Props {
   agent: Agent
+  isDefault?: boolean
+  onSetDefault?: (id: string) => void
 }
 
-export function AgentCard({ agent }: Props) {
+export function AgentCard({ agent, isDefault, onSetDefault }: Props) {
   const setEditingAgentId = useAppStore((s) => s.setEditingAgentId)
   const setAgentSheetOpen = useAppStore((s) => s.setAgentSheetOpen)
   const loadSessions = useAppStore((s) => s.loadSessions)
@@ -52,6 +54,21 @@ export function AgentCard({ agent }: Props) {
     >
       <div className="flex items-center gap-2.5">
         <span className="font-display text-[14px] font-600 truncate flex-1 tracking-[-0.01em]">{agent.name}</span>
+        {isDefault ? (
+          <span className="shrink-0 text-[10px] font-600 uppercase tracking-wider text-accent-bright bg-accent-soft px-2 py-0.5 rounded-[6px]">
+            default
+          </span>
+        ) : onSetDefault && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onSetDefault(agent.id) }}
+            className="shrink-0 text-[10px] font-600 uppercase tracking-wider px-2 py-0.5 rounded-[6px] cursor-pointer
+              transition-all border-none bg-transparent text-text-3/30 hover:text-accent-bright hover:bg-accent-soft"
+            style={{ fontFamily: 'inherit' }}
+            title="Set as default agent for Main Chat"
+          >
+            set default
+          </button>
+        )}
         {agent.isOrchestrator && (
           <button
             onClick={handleRun}

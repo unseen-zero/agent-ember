@@ -12,14 +12,36 @@ export async function GET() {
   return NextResponse.json(sessions)
 }
 
+export async function DELETE(req: Request) {
+  const { ids } = await req.json() as { ids: string[] }
+  if (!Array.isArray(ids) || !ids.length) {
+    return new NextResponse('Missing ids', { status: 400 })
+  }
+  const sessions = loadSessions()
+  for (const id of ids) {
+    if (sessions[id]?.name === '__main__') continue
+    if (active.has(id)) {
+      try { active.get(id).kill() } catch {}
+      active.delete(id)
+    }
+    delete sessions[id]
+  }
+  saveSessions(sessions)
+  return NextResponse.json({ deleted: ids.length })
+}
+
 export async function POST(req: Request) {
   const body = await req.json()
   let cwd = (body.cwd || '').trim()
   if (cwd.startsWith('~/')) cwd = path.join(os.homedir(), cwd.slice(2))
   else if (cwd === '~' || !cwd) cwd = os.homedir()
 
-  const id = crypto.randomBytes(4).toString('hex')
+  const id = body.id || crypto.randomBytes(4).toString('hex')
   const sessions = loadSessions()
+  // If session with this ID already exists, return it as-is
+  if (body.id && sessions[id]) {
+    return NextResponse.json(sessions[id])
+  }
   sessions[id] = {
     id, name: body.name || 'New Session', cwd,
     user: body.user || 'wayde',

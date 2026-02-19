@@ -44,11 +44,13 @@ function initDb() {
     )
   `)
 
-  // Add embedding column if not present (safe migration)
-  try {
-    db.exec(`ALTER TABLE memories ADD COLUMN embedding BLOB`)
-  } catch {
-    // Column already exists — ignore
+  // Safe column migrations for older databases
+  for (const col of [
+    'agentId TEXT',
+    'sessionId TEXT',
+    'embedding BLOB',
+  ]) {
+    try { db.exec(`ALTER TABLE memories ADD COLUMN ${col}`) } catch { /* already exists */ }
   }
 
   // FTS5 virtual table for full-text search

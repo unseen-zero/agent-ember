@@ -6,6 +6,7 @@ import { useChatStore } from '@/stores/use-chat-store'
 import { createSession, createCredential } from '@/lib/sessions'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
 import { DirBrowser } from '@/components/shared/dir-browser'
+import { TOOL_LABELS, TOOL_DESCRIPTIONS } from '@/components/chat/tool-call-bubble'
 import type { ProviderType, SessionTool } from '@/types'
 
 export function NewSessionSheet() {
@@ -56,9 +57,11 @@ export function NewSessionSheet() {
       setNewKeyName('')
       setNewKeyValue('')
       setOllamaMode('local')
-      // Auto-select default agent if available
+      // Auto-select last used agent, or default agent if no history
       const agentsList = Object.values(agents)
-      const defaultAgent = agentsList.find((a: any) => a.id === 'default') || agentsList[0]
+      const lastAgentId = typeof window !== 'undefined' ? localStorage.getItem('swarmclaw-last-agent') : null
+      const lastAgent = lastAgentId ? agentsList.find((a: any) => a.id === lastAgentId) : null
+      const defaultAgent = lastAgent || agentsList.find((a: any) => a.id === 'default') || agentsList[0]
       if (defaultAgent) {
         setSelectedAgentId((defaultAgent as any).id)
         setProvider((defaultAgent as any).provider || 'claude-cli')
@@ -150,6 +153,12 @@ export function NewSessionSheet() {
       agentTools || undefined,
       selectedFile,
     )
+    // Remember agent selection for next time
+    if (selectedAgentId) {
+      localStorage.setItem('swarmclaw-last-agent', selectedAgentId)
+    } else {
+      localStorage.removeItem('swarmclaw-last-agent')
+    }
     updateSessionInStore(s)
     setCurrentSession(s.id)
     setMessages([])
@@ -415,7 +424,14 @@ export function NewSessionSheet() {
             {' / '}
             <span className="text-text-2 font-600">{agents[selectedAgentId].model}</span>
             {agents[selectedAgentId].tools?.length ? (
-              <> + <span className="text-sky-400/70 font-600">{agents[selectedAgentId].tools!.join(', ')}</span></>
+              <> + {agents[selectedAgentId].tools!.map((tool, i) => (
+                <span key={tool}>
+                  {i > 0 && ', '}
+                  <span className="text-sky-400/70 font-600 cursor-help" title={TOOL_DESCRIPTIONS[tool] || tool}>
+                    {TOOL_LABELS[tool] || tool.replace(/_/g, ' ')}
+                  </span>
+                </span>
+              ))}</>
             ) : null}
           </span>
         </div>

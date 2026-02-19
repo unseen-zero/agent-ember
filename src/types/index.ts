@@ -1,12 +1,20 @@
+export interface MessageToolEvent {
+  name: string
+  input: string
+  output?: string
+  error?: boolean
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   text: string
   time: number
   imagePath?: string
   imageUrl?: string
+  toolEvents?: MessageToolEvent[]
 }
 
-export type ProviderType = 'claude-cli' | 'openai' | 'ollama' | 'anthropic' | 'openclaw'
+export type ProviderType = 'claude-cli' | 'codex-cli' | 'opencode-cli' | 'openai' | 'ollama' | 'anthropic' | 'openclaw' | 'google' | 'deepseek' | 'groq' | 'together' | 'mistral' | 'xai' | 'fireworks'
 
 export interface ProviderInfo {
   id: ProviderType
@@ -38,6 +46,7 @@ export interface Session {
   fallbackCredentialIds?: string[]
   apiEndpoint?: string | null
   claudeSessionId: string | null
+  codexThreadId?: string | null
   messages: Message[]
   createdAt: number
   lastActiveAt: number
@@ -203,11 +212,12 @@ export interface MemoryEntry {
 }
 
 export type SessionType = 'human' | 'orchestrated'
-export type AppView = 'sessions' | 'agents' | 'schedules' | 'memory' | 'tasks' | 'secrets' | 'providers' | 'skills' | 'connectors'
+export type AppView = 'sessions' | 'agents' | 'schedules' | 'memory' | 'tasks' | 'secrets' | 'providers' | 'skills' | 'connectors' | 'logs'
 
 // --- App Settings ---
 
-export type LangGraphProvider = 'anthropic' | 'openai' | 'ollama'
+export type LangGraphProvider = string
+export type LoopMode = 'bounded' | 'ongoing'
 
 export interface AppSettings {
   userPrompt?: string
@@ -220,6 +230,20 @@ export interface AppSettings {
   embeddingProvider?: 'local' | 'openai' | 'ollama' | null
   embeddingModel?: string | null
   embeddingCredentialId?: string | null
+  loopMode?: LoopMode
+  agentLoopRecursionLimit?: number
+  orchestratorLoopRecursionLimit?: number
+  legacyOrchestratorMaxTurns?: number
+  ongoingLoopMaxIterations?: number
+  ongoingLoopMaxRuntimeMinutes?: number
+  shellCommandTimeoutSec?: number
+  claudeCodeTimeoutSec?: number
+  cliProcessTimeoutSec?: number
+  elevenLabsApiKey?: string | null
+  elevenLabsVoiceId?: string | null
+  speechRecognitionLang?: string | null
+  heartbeatPrompt?: string | null
+  heartbeatIntervalSec?: number | null
 }
 
 // --- Orchestrator Secrets ---
@@ -270,6 +294,8 @@ export interface Skill {
   filename: string
   content: string
   description?: string
+  sourceUrl?: string
+  sourceFormat?: 'openclaw' | 'plain'
   createdAt: number
   updatedAt: number
 }
@@ -289,6 +315,12 @@ export interface Connector {
   isEnabled: boolean
   status: ConnectorStatus
   lastError?: string | null
+  /** WhatsApp QR code data URL (runtime only) */
+  qrDataUrl?: string | null
+  /** WhatsApp authenticated/paired state (runtime only) */
+  authenticated?: boolean
+  /** WhatsApp has stored credentials from previous pairing (runtime only) */
+  hasCredentials?: boolean
   createdAt: number
   updatedAt: number
 }

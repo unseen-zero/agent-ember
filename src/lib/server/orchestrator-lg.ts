@@ -1,17 +1,14 @@
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
 import { createReactAgent } from '@langchain/langgraph/prebuilt'
-import { ChatAnthropic } from '@langchain/anthropic'
-import { ChatOpenAI } from '@langchain/openai'
 import { loadSessions, saveSessions, loadAgents, loadCredentials, loadSettings, loadSecrets, loadTasks, saveTasks, decryptKey, loadSkills } from './storage'
+import { loadRuntimeSettings, getOrchestratorLoopRecursionLimit } from './runtime-settings'
 import { getMemoryDb } from './memory-db'
+import { buildChatModel } from './build-llm'
 import crypto from 'crypto'
-import type { Agent, LangGraphProvider, TaskComment } from '@/types'
+import type { Agent, TaskComment } from '@/types'
 
-const MAX_RECURSION = 25
-
-const OLLAMA_CLOUD_URL = 'https://ollama.com/v1'
-const OLLAMA_LOCAL_URL = 'http://localhost:11434/v1'
+const NON_LANGGRAPH_PROVIDER_IDS = new Set(['claude-cli', 'codex-cli', 'opencode-cli'])
 
 function resolveCredential(credentialId: string | null | undefined): string | null {
   if (!credentialId) return null
@@ -21,43 +18,42 @@ function resolveCredential(credentialId: string | null | undefined): string | nu
   try { return decryptKey(cred.encryptedKey) } catch { return null }
 }
 
-/** Read the orchestrator engine config from app settings */
-function getLangGraphConfig(): { provider: LangGraphProvider; model: string; apiKey: string | null } {
+/** Resolve which provider/model/key the orchestration routing layer should use */
+function getOrchestrationEngineConfig(orchestrator: Agent): { provider: string; model: string; apiKey: string | null; apiEndpoint: string | null } {
   const settings = loadSettings()
-  const provider = (settings.langGraphProvider || 'anthropic') as LangGraphProvider
-  const model = settings.langGraphModel || ''
-  const apiKey = resolveCredential(settings.langGraphCredentialId)
-  return { provider, model, apiKey }
-}
+  const configuredProvider = typeof settings.langGraphProvider === 'string'
+    ? settings.langGraphProvider.trim()
+    : ''
+  const configuredModel = typeof settings.langGraphModel === 'string'
+    ? settings.langGraphModel.trim()
+    : ''
+  const configuredApiKey = resolveCredential(settings.langGraphCredentialId)
+  const configuredEndpoint = typeof settings.langGraphEndpoint === 'string' && settings.langGraphEndpoint.trim()
+    ? settings.langGraphEndpoint.trim()
+    : null
 
-function buildLLM(overrideProvider?: LangGraphProvider, overrideModel?: string, overrideApiKey?: string | null, overrideEndpoint?: string | null) {
-  const config = getLangGraphConfig()
-  const provider = overrideProvider || config.provider
-  const apiKey = overrideApiKey !== undefined ? overrideApiKey : config.apiKey
-  const model = overrideModel || config.model
+  const fallbackProvider = orchestrator.provider === 'claude-cli' ? 'anthropic' : orchestrator.provider
+  const fallbackModel = orchestrator.model || ''
+  const fallbackApiKey = resolveCredential(orchestrator.credentialId)
+  const fallbackEndpoint = orchestrator.apiEndpoint || null
 
-  if (provider === 'anthropic') {
-    return new ChatAnthropic({
-      model: model || 'claude-sonnet-4-6',
-      anthropicApiKey: apiKey || undefined,
-      maxTokens: 8192,
-    })
+  const useConfiguredEngine = configuredProvider.length > 0 && !NON_LANGGRAPH_PROVIDER_IDS.has(configuredProvider)
+
+  if (useConfiguredEngine) {
+    return {
+      provider: configuredProvider,
+      model: configuredModel,
+      apiKey: configuredApiKey,
+      apiEndpoint: configuredEndpoint,
+    }
   }
-  if (provider === 'openai') {
-    return new ChatOpenAI({
-      model: model || 'gpt-4o',
-      apiKey: apiKey || undefined,
-    })
+
+  return {
+    provider: fallbackProvider,
+    model: fallbackModel,
+    apiKey: fallbackApiKey,
+    apiEndpoint: fallbackEndpoint,
   }
-  // ollama — use explicit endpoint, or cloud when API key present, or local
-  const baseURL = overrideEndpoint
-    ? `${overrideEndpoint.replace(/\/+$/, '')}/v1`
-    : apiKey ? OLLAMA_CLOUD_URL : OLLAMA_LOCAL_URL
-  return new ChatOpenAI({
-    model: model || 'qwen3.5',
-    apiKey: apiKey || 'ollama',
-    configuration: { baseURL },
-  })
 }
 
 /** Resolve secrets available to this orchestrator */
@@ -328,12 +324,14 @@ export async function executeLangGraphOrchestrator(
     ? '\n\nCurrent task board:\n' + taskList.slice(0, 20).map((t: any) => `- [${t.status}] "${t.title}" (id: ${t.id})`).join('\n')
     : ''
 
-  // Build LLM using the orchestrator's own provider/model/credentials
-  const orchProvider = orchestrator.provider === 'claude-cli' ? 'anthropic' : orchestrator.provider as LangGraphProvider
-  const orchApiKey = resolveCredential(orchestrator.credentialId)
-  const orchModel = orchestrator.model || undefined
-  const orchEndpoint = orchestrator.apiEndpoint || null
-  const llm = buildLLM(orchProvider, orchModel, orchApiKey, orchEndpoint)
+  // Build routing LLM from Settings -> Orchestrator Engine (fallback: orchestrator's own provider)
+  const engine = getOrchestrationEngineConfig(orchestrator)
+  const llm = buildChatModel({
+    provider: engine.provider,
+    model: engine.model,
+    apiKey: engine.apiKey,
+    apiEndpoint: engine.apiEndpoint,
+  })
   // Build system message: [userPrompt] \n\n [soul] \n\n [systemPrompt] \n\n [orchestrator context]
   const settings = loadSettings()
   const promptParts: string[] = []
@@ -374,11 +372,21 @@ export async function executeLangGraphOrchestrator(
   saveMessage(sessionId, 'user', task)
 
   let finalResult = ''
+  const runtime = loadRuntimeSettings()
+  const recursionLimit = getOrchestratorLoopRecursionLimit(runtime)
+  const abortController = new AbortController()
+  let timedOut = false
+  const loopTimer = runtime.loopMode === 'ongoing' && runtime.ongoingLoopMaxRuntimeMs
+    ? setTimeout(() => {
+        timedOut = true
+        abortController.abort()
+      }, runtime.ongoingLoopMaxRuntimeMs)
+    : null
 
   try {
     const stream = await agent.stream(
       { messages: [{ role: 'user' as const, content: task }] },
-      { recursionLimit: MAX_RECURSION },
+      { recursionLimit, signal: abortController.signal },
     )
 
     for await (const chunk of stream) {
@@ -400,9 +408,14 @@ export async function executeLangGraphOrchestrator(
       }
     }
   } catch (err: any) {
-    console.error(`[orchestrator-lg] Error:`, err.message)
-    saveMessage(sessionId, 'assistant', `[Error] ${err.message}`)
-    throw err
+    const errMsg = timedOut
+      ? 'Ongoing loop stopped after reaching the configured runtime limit.'
+      : err.message || String(err)
+    console.error(`[orchestrator-lg] Error:`, errMsg)
+    saveMessage(sessionId, 'assistant', `[Error] ${errMsg}`)
+    throw new Error(errMsg)
+  } finally {
+    if (loopTimer) clearTimeout(loopTimer)
   }
 
   // Extract summary from mark_complete if present

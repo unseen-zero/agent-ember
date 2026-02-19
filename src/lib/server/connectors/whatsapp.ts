@@ -11,6 +11,34 @@ import type { PlatformConnector, ConnectorInstance, InboundMessage } from './typ
 
 const AUTH_DIR = path.join(process.cwd(), 'data', 'whatsapp-auth')
 
+/** Normalize a phone number for JID matching — strip leading 0 or + */
+function normalizeNumber(num: string): string {
+  let n = num.replace(/[\s\-()]/g, '')
+  // UK local: 07xxx → 447xxx
+  if (n.startsWith('0') && n.length >= 10) {
+    n = '44' + n.slice(1)
+  }
+  // Strip leading +
+  if (n.startsWith('+')) n = n.slice(1)
+  return n
+}
+
+/** Check if auth directory has saved credentials */
+function hasStoredCreds(authDir: string): boolean {
+  try {
+    return fs.existsSync(path.join(authDir, 'creds.json'))
+  } catch { return false }
+}
+
+/** Clear auth directory to force fresh QR pairing */
+export function clearAuthDir(connectorId: string): void {
+  const authDir = path.join(AUTH_DIR, connectorId)
+  if (fs.existsSync(authDir)) {
+    fs.rmSync(authDir, { recursive: true, force: true })
+    console.log(`[whatsapp] Cleared auth state for connector ${connectorId}`)
+  }
+}
+
 const whatsapp: PlatformConnector = {
   async start(connector, _botToken, onMessage): Promise<ConnectorInstance> {
     // Each connector gets its own auth directory
@@ -22,37 +50,66 @@ const whatsapp: PlatformConnector = {
 
     let sock: ReturnType<typeof makeWASocket> | null = null
     let stopped = false
+    let socketGen = 0 // Track socket generation to ignore stale events
 
     const instance: ConnectorInstance = {
       connector,
       qrDataUrl: null,
+      authenticated: false,
+      hasCredentials: hasStoredCreds(authDir),
       async stop() {
         stopped = true
-        sock?.end(undefined)
+        try { sock?.end(undefined) } catch { /* ignore */ }
         sock = null
         console.log(`[whatsapp] Stopped connector: ${connector.name}`)
       },
     }
 
-    // Optional: restrict to specific numbers/group JIDs
+    // Normalize allowed JIDs for matching
     const allowedJids = connector.config.allowedJids
-      ? connector.config.allowedJids.split(',').map((s) => s.trim()).filter(Boolean)
+      ? connector.config.allowedJids.split(',').map((s) => normalizeNumber(s.trim())).filter(Boolean)
       : null
 
+    // Track message IDs sent by the bot to avoid infinite loops in self-chat
+    const sentMessageIds = new Set<string>()
+
+    if (allowedJids) {
+      console.log(`[whatsapp] Allowed JIDs (normalized): ${allowedJids.join(', ')}`)
+    }
+
     const startSocket = () => {
+      // Close previous socket to prevent stale event handlers
+      if (sock) {
+        try { sock.ev.removeAllListeners('connection.update') } catch { /* ignore */ }
+        try { sock.ev.removeAllListeners('messages.upsert') } catch { /* ignore */ }
+        try { sock.ev.removeAllListeners('creds.update') } catch { /* ignore */ }
+        try { sock.end(undefined) } catch { /* ignore */ }
+        sock = null
+      }
+
+      const gen = ++socketGen // Capture generation for stale detection
+      console.log(`[whatsapp] Starting socket gen=${gen} for ${connector.name} (hasCreds=${instance.hasCredentials})`)
+
       sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true,
         browser: ['SwarmClaw', 'Chrome', '120.0'],
       })
 
-      sock.ev.on('creds.update', saveCreds)
+      sock.ev.on('creds.update', () => {
+        saveCreds()
+        // Update hasCredentials after first cred save
+        instance.hasCredentials = true
+      })
 
       sock.ev.on('connection.update', async (update) => {
+        if (gen !== socketGen) return // Ignore events from stale sockets
+
         const { connection, lastDisconnect, qr } = update
+        console.log(`[whatsapp] Connection update gen=${gen}: connection=${connection}, hasQR=${!!qr}`)
+
         if (qr) {
-          console.log(`[whatsapp] Scan QR code to connect ${connector.name}`)
+          console.log(`[whatsapp] QR code generated for ${connector.name}`)
           try {
             instance.qrDataUrl = await QRCode.toDataURL(qr, {
               width: 280,
@@ -66,27 +123,86 @@ const whatsapp: PlatformConnector = {
         if (connection === 'close') {
           instance.qrDataUrl = null
           const reason = (lastDisconnect?.error as any)?.output?.statusCode
-          if (reason !== DisconnectReason.loggedOut && !stopped) {
-            console.log(`[whatsapp] Connection closed (${reason}), reconnecting...`)
+          console.log(`[whatsapp] Connection closed: reason=${reason} stopped=${stopped}`)
+
+          if (reason === DisconnectReason.loggedOut) {
+            // Session invalidated — clear auth and restart to get fresh QR
+            console.log(`[whatsapp] Logged out — clearing auth and restarting for fresh QR`)
+            instance.authenticated = false
+            instance.hasCredentials = false
+            clearAuthDir(connector.id)
+            if (!stopped) {
+              // Recreate auth dir and state for fresh start
+              fs.mkdirSync(authDir, { recursive: true })
+              setTimeout(startSocket, 1000)
+            }
+          } else if (reason === 440) {
+            // Conflict — another session replaced this one. Do NOT reconnect
+            // (reconnecting would create a ping-pong loop with the other session)
+            console.log(`[whatsapp] Session conflict (replaced by another connection) — stopping`)
+            instance.authenticated = false
+          } else if (!stopped) {
+            console.log(`[whatsapp] Reconnecting in 3s...`)
             setTimeout(startSocket, 3000)
           } else {
             console.log(`[whatsapp] Disconnected permanently`)
           }
         } else if (connection === 'open') {
+          instance.authenticated = true
+          instance.hasCredentials = true
           instance.qrDataUrl = null
           console.log(`[whatsapp] Connected as ${sock?.user?.id}`)
         }
       })
 
-      sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return
+      sock.ev.on('messages.upsert', async (upsert) => {
+        const { messages, type } = upsert
+        console.log(`[whatsapp] messages.upsert gen=${gen}: type=${type}, count=${messages.length}`)
+
+        if (gen !== socketGen) {
+          console.log(`[whatsapp] Ignoring stale socket event (gen=${gen}, current=${socketGen})`)
+          return
+        }
+        if (type !== 'notify') {
+          console.log(`[whatsapp] Ignoring non-notify upsert type: ${type}`)
+          return
+        }
 
         for (const msg of messages) {
-          if (msg.key.fromMe) continue
+          console.log(`[whatsapp] Processing message: fromMe=${msg.key.fromMe}, jid=${msg.key.remoteJid}, hasConversation=${!!msg.message?.conversation}, hasExtended=${!!msg.message?.extendedTextMessage}`)
+
           if (msg.key.remoteJid === 'status@broadcast') continue
 
+          // Skip messages sent by the bot itself (tracked by ID to prevent infinite loops)
+          if (msg.key.id && sentMessageIds.has(msg.key.id)) {
+            console.log(`[whatsapp] Skipping own bot reply: ${msg.key.id}`)
+            sentMessageIds.delete(msg.key.id) // Clean up
+            continue
+          }
+
+          // Handle self-chat (same number messaging itself for testing)
+          // Self-chat JID can be phone format (447xxx@s.whatsapp.net) or LID format (185xxx@lid)
+          const remoteNum = msg.key.remoteJid?.split('@')[0] || ''
+          const remoteHost = msg.key.remoteJid?.split('@')[1] || ''
+          const myPhoneNum = sock?.user?.id?.split(':')[0] || ''
+          const myLid = sock?.user?.lid?.split(':')[0] || ''
+          const isSelfChat = (remoteNum === myPhoneNum) || (remoteHost === 'lid' && (myLid ? remoteNum === myLid : true))
+          console.log(`[whatsapp] Self-chat check: remote=${remoteNum}@${remoteHost}, myPhone=${myPhoneNum}, myLid=${myLid}, isSelf=${isSelfChat}`)
+          if (msg.key.fromMe && !isSelfChat) continue
+
           const jid = msg.key.remoteJid || ''
-          if (allowedJids && !allowedJids.some((j) => jid.includes(j))) continue
+
+          // Match allowed JIDs using normalized numbers
+          // Self-chat always passes the filter (it's the bot's own account)
+          if (allowedJids && !isSelfChat) {
+            const jidNumber = jid.split('@')[0]
+            const matched = allowedJids.some((n) => jidNumber.includes(n) || n.includes(jidNumber))
+            console.log(`[whatsapp] JID filter: jidNumber=${jidNumber}, allowedJids=${allowedJids.join(',')}, matched=${matched}`)
+            if (!matched) {
+              console.log(`[whatsapp] Skipping message from non-allowed JID: ${jid}`)
+              continue
+            }
+          }
 
           const text = msg.message?.conversation
             || msg.message?.extendedTextMessage?.text
@@ -95,6 +211,8 @@ const whatsapp: PlatformConnector = {
 
           const senderName = msg.pushName || jid.split('@')[0]
           const isGroup = jid.endsWith('@g.us')
+
+          console.log(`[whatsapp] Message from ${senderName} (${jid}): ${text.slice(0, 80)}`)
 
           const inbound: InboundMessage = {
             platform: 'whatsapp',
@@ -109,7 +227,20 @@ const whatsapp: PlatformConnector = {
             await sock!.sendPresenceUpdate('composing', jid)
             const response = await onMessage(inbound)
             await sock!.sendPresenceUpdate('paused', jid)
-            await sock!.sendMessage(jid, { text: response })
+
+            // WhatsApp has a ~65K char limit but keep it reasonable
+            const sendAndTrack = async (text: string) => {
+              const sent = await sock!.sendMessage(jid, { text })
+              if (sent?.key?.id) sentMessageIds.add(sent.key.id)
+            }
+            if (response.length <= 4096) {
+              await sendAndTrack(response)
+            } else {
+              const chunks = response.match(/[\s\S]{1,4000}/g) || [response]
+              for (const chunk of chunks) {
+                await sendAndTrack(chunk)
+              }
+            }
           } catch (err: any) {
             console.error(`[whatsapp] Error handling message:`, err.message)
             try {

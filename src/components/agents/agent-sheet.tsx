@@ -5,6 +5,7 @@ import { useAppStore } from '@/stores/use-app-store'
 import { createAgent, updateAgent, deleteAgent } from '@/lib/agents'
 import { api } from '@/lib/api-client'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
+import { AiGenBlock } from '@/components/shared/ai-gen-block'
 import type { ProviderType, ClaudeSkill } from '@/types'
 
 const AVAILABLE_TOOLS: { id: string; label: string; description: string }[] = [
@@ -70,6 +71,10 @@ export function AgentSheet() {
   const [fallbackCredentialIds, setFallbackCredentialIds] = useState<string[]>([])
   const [platformAssignScope, setPlatformAssignScope] = useState<'self' | 'all'>('self')
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
+  const [addingKey, setAddingKey] = useState(false)
+  const [newKeyName, setNewKeyName] = useState('')
+  const [newKeyValue, setNewKeyValue] = useState('')
+  const [savingKey, setSavingKey] = useState(false)
 
   const soulFileRef = useRef<HTMLInputElement>(null)
   const promptFileRef = useRef<HTMLInputElement>(null)
@@ -233,43 +238,12 @@ export function AgentSheet() {
       </div>
 
       {/* AI Generation */}
-      {!editing && (
-        <div className="mb-10 p-5 rounded-[18px] border border-[#6366F1]/15 bg-[#6366F1]/[0.03]">
-          <div className="flex items-center gap-2.5 mb-4">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-accent-bright shrink-0">
-              <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" fill="currentColor" />
-            </svg>
-            <span className="font-display text-[13px] font-600 text-accent-bright">Generate with AI</span>
-          </div>
-          <textarea
-            value={aiPrompt}
-            onChange={(e) => setAiPrompt(e.target.value)}
-            placeholder="Describe the agent you want, e.g. &quot;An SEO keyword researcher that finds low-competition long-tail keywords in the health niche and outputs them as structured data&quot;"
-            rows={3}
-            className="w-full px-4 py-3 rounded-[12px] border border-[#6366F1]/10 bg-[#6366F1]/[0.02] text-text text-[14px] outline-none transition-all duration-200 placeholder:text-text-3/40 focus:border-[#6366F1]/30 resize-none"
-            style={{ fontFamily: 'inherit' }}
-          />
-          <button
-            onClick={handleGenerate}
-            disabled={generating || !aiPrompt.trim()}
-            className="mt-3 px-5 py-2.5 rounded-[12px] border-none bg-[#6366F1] text-white text-[13px] font-600 cursor-pointer
-              disabled:opacity-30 transition-all hover:brightness-110 active:scale-[0.97]
-              shadow-[0_2px_12px_rgba(99,102,241,0.2)]"
-            style={{ fontFamily: 'inherit' }}
-          >
-            {generating ? 'Generating...' : generated ? 'Regenerate' : 'Generate'}
-          </button>
-          {generated && (
-            <span className="ml-3 text-[12px] text-emerald-400/70">Fields populated — edit as needed below</span>
-          )}
-          {genError && (
-            <p className="mt-2 text-[12px] text-red-400/80">{genError}</p>
-          )}
-          <p className="mt-3 text-[11px] text-text-3/50">
-            Using {appSettings.langGraphModel || (appSettings.langGraphProvider === 'openai' ? 'gpt-4o' : appSettings.langGraphProvider === 'ollama' ? 'qwen3.5' : 'claude-sonnet-4-6')} via {appSettings.langGraphProvider || 'anthropic'}
-          </p>
-        </div>
-      )}
+      {!editing && <AiGenBlock
+        aiPrompt={aiPrompt} setAiPrompt={setAiPrompt}
+        generating={generating} generated={generated} genError={genError}
+        onGenerate={handleGenerate} appSettings={appSettings}
+        placeholder='Describe the agent you want, e.g. "An SEO keyword researcher that finds low-competition long-tail keywords"'
+      />}
 
       <div className="mb-8">
         <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">Name</label>
@@ -319,20 +293,26 @@ export function AgentSheet() {
       <div className="mb-8">
         <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">Provider</label>
         <div className="grid grid-cols-3 gap-3">
-          {providers.filter((p) => !isOrchestrator || p.id !== 'claude-cli').map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setProvider(p.id)}
-              className={`py-3.5 px-4 rounded-[14px] text-center cursor-pointer transition-all duration-200
-                active:scale-[0.97] text-[14px] font-600 border
-                ${provider === p.id
-                  ? 'bg-accent-soft border-accent-bright/25 text-accent-bright'
-                  : 'bg-surface border-white/[0.06] text-text-2 hover:bg-surface-2'}`}
-              style={{ fontFamily: 'inherit' }}
-            >
-              {p.name}
-            </button>
-          ))}
+          {providers.filter((p) => !isOrchestrator || p.id !== 'claude-cli').map((p) => {
+            const isConnected = !p.requiresApiKey || Object.values(credentials).some((c) => c.provider === p.id)
+            return (
+              <button
+                key={p.id}
+                onClick={() => setProvider(p.id)}
+                className={`relative py-3.5 px-4 rounded-[14px] text-center cursor-pointer transition-all duration-200
+                  active:scale-[0.97] text-[14px] font-600 border
+                  ${provider === p.id
+                    ? 'bg-accent-soft border-accent-bright/25 text-accent-bright'
+                    : 'bg-surface border-white/[0.06] text-text-2 hover:bg-surface-2'}`}
+                style={{ fontFamily: 'inherit' }}
+              >
+                {isConnected && (
+                  <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-emerald-400" />
+                )}
+                {p.name}
+              </button>
+            )
+          })}
         </div>
       </div>
 
@@ -382,12 +362,76 @@ export function AgentSheet() {
       {(currentProvider?.requiresApiKey || (provider === 'ollama' && ollamaMode === 'cloud')) && (
         <div className="mb-8">
           <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">API Key</label>
-          <select value={credentialId || ''} onChange={(e) => setCredentialId(e.target.value || null)} className={`${inputClass} appearance-none cursor-pointer`} style={{ fontFamily: 'inherit' }}>
-            <option value="">Select a key...</option>
-            {providerCredentials.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
+          {providerCredentials.length > 0 && !addingKey ? (
+            <div className="flex gap-2">
+              <select value={credentialId || ''} onChange={(e) => {
+                if (e.target.value === '__add__') {
+                  setAddingKey(true)
+                  setNewKeyName('')
+                  setNewKeyValue('')
+                } else {
+                  setCredentialId(e.target.value || null)
+                }
+              }} className={`${inputClass} appearance-none cursor-pointer flex-1`} style={{ fontFamily: 'inherit' }}>
+                <option value="">Select a key...</option>
+                {providerCredentials.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+                <option value="__add__">+ Add new key...</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => { setAddingKey(true); setNewKeyName(''); setNewKeyValue('') }}
+                className="shrink-0 px-3 py-2.5 rounded-[10px] bg-accent-soft/50 text-accent-bright text-[12px] font-600 hover:bg-accent-soft transition-colors cursor-pointer border border-accent-bright/20"
+              >
+                + New
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3 p-4 rounded-[12px] border border-accent-bright/15 bg-accent-soft/20">
+              <input
+                type="text"
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                placeholder="Key name (optional)"
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+              <input
+                type="password"
+                value={newKeyValue}
+                onChange={(e) => setNewKeyValue(e.target.value)}
+                placeholder="Paste API key..."
+                className={inputClass}
+                style={{ fontFamily: 'inherit' }}
+              />
+              <div className="flex gap-2 justify-end">
+                {providerCredentials.length > 0 && (
+                  <button type="button" onClick={() => setAddingKey(false)} className="px-3 py-1.5 text-[12px] text-text-3 hover:text-text-2 transition-colors cursor-pointer bg-transparent border-none" style={{ fontFamily: 'inherit' }}>Cancel</button>
+                )}
+                <button
+                  type="button"
+                  disabled={savingKey || !newKeyValue.trim()}
+                  onClick={async () => {
+                    setSavingKey(true)
+                    try {
+                      const cred = await api<any>('POST', '/credentials', { provider, name: newKeyName.trim() || `${provider} key`, apiKey: newKeyValue.trim() })
+                      await loadCredentials()
+                      setCredentialId(cred.id)
+                      setAddingKey(false)
+                      setNewKeyName('')
+                      setNewKeyValue('')
+                    } catch (err: any) { alert(`Failed to save: ${err.message}`) }
+                    finally { setSavingKey(false) }
+                  }}
+                  className="px-4 py-1.5 rounded-[8px] bg-accent-bright text-white text-[12px] font-600 cursor-pointer border-none hover:brightness-110 transition-all disabled:opacity-40"
+                  style={{ fontFamily: 'inherit' }}
+                >
+                  {savingKey ? 'Saving...' : 'Save Key'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -431,67 +475,80 @@ export function AgentSheet() {
         </div>
       )}
 
-      {/* Tools */}
-      <div className="mb-8">
-        <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Tools</label>
-        <p className="text-[12px] text-text-3/60 mb-3">
-          {provider === 'claude-cli' ? 'Claude Code has built-in tools. Toggle browser for web browsing.' : 'Enable tools for LangGraph agent sessions.'}
-        </p>
-        <div className="space-y-3">
-          {AVAILABLE_TOOLS.filter((t) => provider === 'claude-cli' ? t.id === 'browser' : true).map((t) => (
-            <label key={t.id} className="flex items-center gap-3 cursor-pointer">
-              <div
-                onClick={() => setTools((prev) => prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id])}
-                className={`w-11 h-6 rounded-full transition-all duration-200 relative cursor-pointer shrink-0
-                  ${tools.includes(t.id) ? 'bg-[#6366F1]' : 'bg-white/[0.08]'}`}
-              >
-                <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all duration-200
-                  ${tools.includes(t.id) ? 'left-[22px]' : 'left-0.5'}`} />
-              </div>
-              <span className="font-display text-[14px] font-600 text-text-2">{t.label}</span>
-              <span className="text-[12px] text-text-3">{t.description}</span>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      {/* Platform */}
-      <div className="mb-8">
-        <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Platform</label>
-        <p className="text-[12px] text-text-3/60 mb-3">Allow this agent to manage platform resources directly.</p>
-        <div className="space-y-3">
-          {PLATFORM_TOOLS.map((t) => (
-            <label key={t.id} className="flex items-center gap-3 cursor-pointer">
-              <div
-                onClick={() => setTools((prev) => prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id])}
-                className={`w-11 h-6 rounded-full transition-all duration-200 relative cursor-pointer shrink-0
-                  ${tools.includes(t.id) ? 'bg-[#6366F1]' : 'bg-white/[0.08]'}`}
-              >
-                <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all duration-200
-                  ${tools.includes(t.id) ? 'left-[22px]' : 'left-0.5'}`} />
-              </div>
-              <span className="font-display text-[14px] font-600 text-text-2">{t.label}</span>
-              <span className="text-[12px] text-text-3">{t.description}</span>
-            </label>
-          ))}
-        </div>
-        {(tools.includes('manage_tasks') || tools.includes('manage_schedules')) && (
-          <div className="mt-4 ml-1 pt-3 border-t border-white/[0.04]">
-            <label className="flex items-center gap-3 cursor-pointer">
-              <div
-                onClick={() => setPlatformAssignScope((prev) => prev === 'all' ? 'self' : 'all')}
-                className={`w-11 h-6 rounded-full transition-all duration-200 relative cursor-pointer shrink-0
-                  ${platformAssignScope === 'all' ? 'bg-[#6366F1]' : 'bg-white/[0.08]'}`}
-              >
-                <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all duration-200
-                  ${platformAssignScope === 'all' ? 'left-[22px]' : 'left-0.5'}`} />
-              </div>
-              <span className="font-display text-[14px] font-600 text-text-2">Assign to Other Agents</span>
-              <span className="text-[12px] text-text-3">Allow this agent to assign tasks and schedules to other agents</span>
-            </label>
+      {/* Tools — hidden for CLI providers that handle tools natively (except Claude CLI which exposes browser toggle) */}
+      {provider !== 'codex-cli' && provider !== 'opencode-cli' && (
+        <div className="mb-8">
+          <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Tools</label>
+          <p className="text-[12px] text-text-3/60 mb-3">
+            {provider === 'claude-cli' ? 'Claude Code has built-in tools. Toggle browser for web browsing.' : 'Enable tools for LangGraph agent sessions.'}
+          </p>
+          <div className="space-y-3">
+            {AVAILABLE_TOOLS.filter((t) => provider === 'claude-cli' ? t.id === 'browser' : true).map((t) => (
+              <label key={t.id} className="flex items-center gap-3 cursor-pointer">
+                <div
+                  onClick={() => setTools((prev) => prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id])}
+                  className={`w-11 h-6 rounded-full transition-all duration-200 relative cursor-pointer shrink-0
+                    ${tools.includes(t.id) ? 'bg-[#6366F1]' : 'bg-white/[0.08]'}`}
+                >
+                  <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all duration-200
+                    ${tools.includes(t.id) ? 'left-[22px]' : 'left-0.5'}`} />
+                </div>
+                <span className="font-display text-[14px] font-600 text-text-2">{t.label}</span>
+                <span className="text-[12px] text-text-3">{t.description}</span>
+              </label>
+            ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Platform — hidden for CLI providers that can't use LangGraph tools */}
+      {provider !== 'codex-cli' && provider !== 'opencode-cli' && (
+        <div className="mb-8">
+          <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Platform</label>
+          <p className="text-[12px] text-text-3/60 mb-3">Allow this agent to manage platform resources directly.</p>
+          <div className="space-y-3">
+            {PLATFORM_TOOLS.map((t) => (
+              <label key={t.id} className="flex items-center gap-3 cursor-pointer">
+                <div
+                  onClick={() => setTools((prev) => prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id])}
+                  className={`w-11 h-6 rounded-full transition-all duration-200 relative cursor-pointer shrink-0
+                    ${tools.includes(t.id) ? 'bg-[#6366F1]' : 'bg-white/[0.08]'}`}
+                >
+                  <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all duration-200
+                    ${tools.includes(t.id) ? 'left-[22px]' : 'left-0.5'}`} />
+                </div>
+                <span className="font-display text-[14px] font-600 text-text-2">{t.label}</span>
+                <span className="text-[12px] text-text-3">{t.description}</span>
+              </label>
+            ))}
+          </div>
+          {(tools.includes('manage_tasks') || tools.includes('manage_schedules')) && (
+            <div className="mt-4 ml-1 pt-3 border-t border-white/[0.04]">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <div
+                  onClick={() => setPlatformAssignScope((prev) => prev === 'all' ? 'self' : 'all')}
+                  className={`w-11 h-6 rounded-full transition-all duration-200 relative cursor-pointer shrink-0
+                    ${platformAssignScope === 'all' ? 'bg-[#6366F1]' : 'bg-white/[0.08]'}`}
+                >
+                  <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all duration-200
+                    ${platformAssignScope === 'all' ? 'left-[22px]' : 'left-0.5'}`} />
+                </div>
+                <span className="font-display text-[14px] font-600 text-text-2">Assign to Other Agents</span>
+                <span className="text-[12px] text-text-3">Allow this agent to assign tasks and schedules to other agents</span>
+              </label>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* CLI provider note */}
+      {(provider === 'codex-cli' || provider === 'opencode-cli') && (
+        <div className="mb-8 p-4 rounded-[14px] bg-white/[0.02] border border-white/[0.06]">
+          <p className="text-[13px] text-text-3">
+            {provider === 'codex-cli' ? 'OpenAI Codex CLI' : 'OpenCode CLI'} uses its own built-in tools (shell, files, etc.) — no additional tool configuration needed.
+          </p>
+        </div>
+      )}
 
       {/* Skills — discovered from ~/.claude/skills/ */}
       {provider === 'claude-cli' && (

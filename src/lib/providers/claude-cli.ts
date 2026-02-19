@@ -4,6 +4,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 import type { StreamChatOptions } from './index'
 import { log } from '../server/logger'
+import { loadRuntimeSettings } from '../server/runtime-settings'
 
 function findClaude(): string {
   const locations = [
@@ -24,6 +25,7 @@ function findClaude(): string {
 const CLAUDE = findClaude()
 
 export function streamClaudeCliChat({ session, message, imagePath, systemPrompt, write, active }: StreamChatOptions): Promise<string> {
+  const processTimeoutMs = loadRuntimeSettings().cliProcessTimeoutMs
   let prompt = message
   if (imagePath) {
     prompt = `[The user has shared an image at: ${imagePath}]\n\n${message}`
@@ -75,7 +77,7 @@ export function streamClaudeCliChat({ session, message, imagePath, systemPrompt,
     cwd: session.cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
-    timeout: 300000,
+    timeout: processTimeoutMs,
   })
 
   log.info('claude-cli', `Process spawned: pid=${proc.pid}`)

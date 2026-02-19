@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
+import { api } from '@/lib/api-client'
 import { AgentCard } from './agent-card'
 
 interface Props {
@@ -11,9 +12,26 @@ interface Props {
 export function AgentList({ inSidebar }: Props) {
   const agents = useAppStore((s) => s.agents)
   const loadAgents = useAppStore((s) => s.loadAgents)
+  const sessions = useAppStore((s) => s.sessions)
+  const currentUser = useAppStore((s) => s.currentUser)
+  const loadSessions = useAppStore((s) => s.loadSessions)
   const setAgentSheetOpen = useAppStore((s) => s.setAgentSheetOpen)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<'all' | 'orchestrator' | 'agent'>('all')
+
+  const mainSession = useMemo(() =>
+    Object.values(sessions).find((s: any) => s.name === '__main__' && s.user === currentUser),
+    [sessions, currentUser]
+  )
+  const defaultAgentId = mainSession?.agentId || 'default'
+
+  const handleSetDefault = useCallback(async (agentId: string) => {
+    if (!mainSession) return
+    try {
+      await api('PUT', `/sessions/${mainSession.id}`, { agentId })
+      await loadSessions()
+    } catch { /* ignore */ }
+  }, [mainSession, loadSessions])
 
   useEffect(() => { loadAgents() }, [])
 
@@ -84,7 +102,7 @@ export function AgentList({ inSidebar }: Props) {
       </div>
       <div className="flex flex-col gap-1 px-2 pb-4">
         {filtered.map((p) => (
-          <AgentCard key={p.id} agent={p} />
+          <AgentCard key={p.id} agent={p} isDefault={p.id === defaultAgentId} onSetDefault={handleSetDefault} />
         ))}
       </div>
     </div>

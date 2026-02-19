@@ -3,8 +3,8 @@
 import { useEffect, useState, useRef } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
+import { AiGenBlock } from '@/components/shared/ai-gen-block'
 import { api } from '@/lib/api-client'
-import type { Skill } from '@/types'
 
 export function SkillSheet() {
   const open = useAppStore((s) => s.skillSheetOpen)
@@ -19,11 +19,78 @@ export function SkillSheet() {
   const [filename, setFilename] = useState('')
   const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
+  const [importUrl, setImportUrl] = useState('')
+  const [importingUrl, setImportingUrl] = useState(false)
+  const [importError, setImportError] = useState('')
+  const [importNotice, setImportNotice] = useState('')
+
+  // AI generation state
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [generated, setGenerated] = useState(false)
+  const [genError, setGenError] = useState('')
+  const appSettings = useAppStore((s) => s.appSettings)
+  const loadSettings = useAppStore((s) => s.loadSettings)
 
   const editing = editingId ? skills[editingId] : null
 
+  const handleGenerate = async () => {
+    if (!aiPrompt.trim()) return
+    setGenerating(true)
+    setGenError('')
+    try {
+      const result = await api<{ name?: string; description?: string; content?: string; error?: string }>('POST', '/generate', { type: 'skill', prompt: aiPrompt })
+      if (result.error) {
+        setGenError(result.error)
+      } else if (result.name || result.content) {
+        if (result.name) { setName(result.name); setFilename(`${result.name.toLowerCase().replace(/\s+/g, '-')}.md`) }
+        if (result.description) setDescription(result.description)
+        if (result.content) setContent(result.content)
+        setGenerated(true)
+      } else {
+        setGenError('AI returned empty response — try again')
+      }
+    } catch (err: unknown) {
+      setGenError(err instanceof Error ? err.message : 'Generation failed')
+    }
+    setGenerating(false)
+  }
+
+  const handleImportFromUrl = async () => {
+    if (!importUrl.trim()) return
+    setImportingUrl(true)
+    setImportError('')
+    setImportNotice('')
+    try {
+      const result = await api<{ name: string; filename: string; description?: string; content: string; sourceFormat?: 'openclaw' | 'plain' }>('POST', '/skills/import', { url: importUrl.trim() })
+      setName(result.name || '')
+      setFilename(result.filename || '')
+      setDescription(result.description || '')
+      setContent(result.content || '')
+      if (result.sourceFormat === 'openclaw') {
+        setImportNotice('Imported OpenClaw SKILL.md format and stripped frontmatter automatically.')
+      } else {
+        setImportNotice('Skill imported from URL.')
+      }
+      setGenerated(false)
+    } catch (err: unknown) {
+      setImportError(err instanceof Error ? err.message : 'Failed to import skill URL')
+    } finally {
+      setImportingUrl(false)
+    }
+  }
+
   useEffect(() => {
     if (open) {
+      loadSettings()
+      setAiPrompt('')
+      setGenerating(false)
+      setGenerated(false)
+      setGenError('')
+      setImportUrl('')
+      setImportingUrl(false)
+      setImportError('')
+      setImportNotice('')
       if (editing) {
         setName(editing.name)
         setFilename(editing.filename)
@@ -92,6 +159,14 @@ export function SkillSheet() {
         <p className="text-[14px] text-text-3">Upload or write a reusable instruction set for agents</p>
       </div>
 
+      {/* AI Generation */}
+      {!editing && <AiGenBlock
+        aiPrompt={aiPrompt} setAiPrompt={setAiPrompt}
+        generating={generating} generated={generated} genError={genError}
+        onGenerate={handleGenerate} appSettings={appSettings}
+        placeholder='Describe the skill, e.g. "A frontend design skill for building polished React components with Tailwind"'
+      />}
+
       {/* File upload */}
       {!editing && (
         <div className="mb-8">
@@ -107,6 +182,32 @@ export function SkillSheet() {
             Upload .md file
           </label>
           <input ref={fileRef} type="file" accept=".md,.txt,.markdown" onChange={handleFileUpload} className="hidden" />
+        </div>
+      )}
+
+      {!editing && (
+        <div className="mb-8 p-4 rounded-[14px] border border-white/[0.08] bg-surface">
+          <label className="block font-display text-[11px] font-600 text-text-3 uppercase tracking-[0.08em] mb-3">Import from URL</label>
+          <div className="flex gap-2">
+            <input
+              type="url"
+              value={importUrl}
+              onChange={(e) => setImportUrl(e.target.value)}
+              placeholder="https://.../SKILL.md"
+              className={`${inputClass} flex-1`}
+              style={{ fontFamily: 'inherit' }}
+            />
+            <button
+              onClick={handleImportFromUrl}
+              disabled={importingUrl || !importUrl.trim()}
+              className="px-4 py-3 rounded-[12px] border-none bg-[#6366F1] text-white text-[13px] font-600 cursor-pointer disabled:opacity-30 transition-all hover:brightness-110"
+              style={{ fontFamily: 'inherit' }}
+            >
+              {importingUrl ? 'Importing...' : 'Import'}
+            </button>
+          </div>
+          {importError && <p className="mt-2 text-[12px] text-red-400/80">{importError}</p>}
+          {importNotice && <p className="mt-2 text-[12px] text-emerald-400/80">{importNotice}</p>}
         </div>
       )}
 

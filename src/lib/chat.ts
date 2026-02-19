@@ -1,12 +1,17 @@
 import type { SSEEvent } from '../types'
 import { getStoredAccessKey } from './api-client'
 
+interface StreamChatOptions {
+  internal?: boolean
+}
+
 export async function streamChat(
   sessionId: string,
   message: string,
   imagePath?: string,
   imageUrl?: string,
   onEvent?: (event: SSEEvent) => void,
+  options?: StreamChatOptions,
 ): Promise<void> {
   const key = getStoredAccessKey()
   const res = await fetch(`/api/sessions/${sessionId}/chat`, {
@@ -15,7 +20,7 @@ export async function streamChat(
       'Content-Type': 'application/json',
       ...(key ? { 'X-Access-Key': key } : {}),
     },
-    body: JSON.stringify({ message, imagePath, imageUrl }),
+    body: JSON.stringify({ message, imagePath, imageUrl, internal: !!options?.internal }),
   })
 
   if (res.status === 409) {

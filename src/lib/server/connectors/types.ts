@@ -18,6 +18,10 @@ export interface ConnectorInstance {
   stop: () => Promise<void>
   /** Current QR code data URL (WhatsApp only, null when paired) */
   qrDataUrl?: string | null
+  /** Whether the connector has successfully authenticated (WhatsApp only) */
+  authenticated?: boolean
+  /** Whether the connector has existing saved credentials (WhatsApp only) */
+  hasCredentials?: boolean
 }
 
 /** Platform-specific connector implementation */

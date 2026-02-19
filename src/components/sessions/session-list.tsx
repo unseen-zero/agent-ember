@@ -19,12 +19,14 @@ export function SessionList({ inSidebar, onSelect }: Props) {
   const currentSessionId = useAppStore((s) => s.currentSessionId)
   const setCurrentSession = useAppStore((s) => s.setCurrentSession)
   const setNewSessionOpen = useAppStore((s) => s.setNewSessionOpen)
+  const clearSessions = useAppStore((s) => s.clearSessions)
   const setMessages = useChatStore((s) => s.setMessages)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<SessionFilter>('all')
 
   const allUserSessions = useMemo(() => {
     return Object.values(sessions).filter((s) => {
+      if (s.name === '__main__') return false
       if (s.user !== currentUser && !((!s.user) && currentUser === 'wayde') && s.user !== 'system') return false
       return true
     })
@@ -82,7 +84,7 @@ export function SessionList({ inSidebar, onSelect }: Props) {
   return (
     <div className="flex-1 flex flex-col overflow-y-auto">
       {/* Filter tabs — always visible when sessions exist */}
-      <div className="flex gap-1 px-4 pt-2 pb-1 shrink-0">
+      <div className="flex items-center gap-1 px-4 pt-2 pb-1 shrink-0">
         {(['all', 'active', 'human', 'orchestrated'] as SessionFilter[]).map((f) => (
           <button
             key={f}
@@ -94,6 +96,22 @@ export function SessionList({ inSidebar, onSelect }: Props) {
             {f === 'all' ? 'All' : f === 'active' ? 'Active' : f === 'human' ? 'Human' : 'AI'}
           </button>
         ))}
+        {filtered.length > 0 && (
+          <button
+            onClick={async () => {
+              if (!window.confirm(`Delete ${filtered.length} session${filtered.length === 1 ? '' : 's'}?`)) return
+              await clearSessions(filtered.map((s) => s.id))
+            }}
+            className="ml-auto p-1.5 rounded-[8px] text-text-3/40 hover:text-red-400 hover:bg-red-400/[0.06]
+              cursor-pointer transition-all bg-transparent border-none"
+            title="Clear all sessions"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+              <path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {(filtered.length > 3 || search) && (

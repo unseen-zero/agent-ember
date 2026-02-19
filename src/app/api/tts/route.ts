@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server'
+import { loadSettings } from '@/lib/server/storage'
 
 export async function POST(req: Request) {
-  const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY
-  const ELEVENLABS_VOICE = process.env.ELEVENLABS_VOICE || 'JBFqnCBsd6RMkjVDRZzb'
+  const settings = loadSettings()
+  const ELEVENLABS_KEY = settings.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY
+  const ELEVENLABS_VOICE = settings.elevenLabsVoiceId || process.env.ELEVENLABS_VOICE || 'JBFqnCBsd6RMkjVDRZzb'
 
   if (!ELEVENLABS_KEY) {
-    return new NextResponse('No ElevenLabs API key', { status: 500 })
+    return new NextResponse('No ElevenLabs API key. Set one in Settings > Voice.', { status: 500 })
   }
 
   const { text } = await req.json()

@@ -11,11 +11,37 @@ const telegram: PlatformConnector = {
       ? connector.config.chatIds.split(',').map((s) => s.trim()).filter(Boolean)
       : null
 
+    // Log all errors
+    bot.catch((err) => {
+      console.error(`[telegram] Bot error:`, err.message || err)
+    })
+
+    // Delete any existing webhook so long polling works
+    await bot.api.deleteWebhook().catch((err) => {
+      console.error('[telegram] Failed to delete webhook:', err.message)
+    })
+
+    // Log all incoming updates for debugging
+    bot.use(async (ctx, next) => {
+      console.log(`[telegram] Update received: chat=${ctx.chat?.id}, from=${ctx.from?.first_name}, hasText=${!!ctx.message?.text}`)
+      await next()
+    })
+
+    // Handle /start command (required for new conversations)
+    bot.command('start', async (ctx) => {
+      console.log(`[telegram] /start from ${ctx.from?.first_name} (chat=${ctx.chat.id})`)
+      await ctx.reply('Hello! I\'m ready to chat. Send me a message.')
+    })
+
     bot.on('message:text', async (ctx) => {
       const chatId = String(ctx.chat.id)
+      console.log(`[telegram] Message from ${ctx.from.first_name} (chat=${chatId}): ${ctx.message.text.slice(0, 80)}`)
 
       // Filter by allowed chats if configured
-      if (allowedChats && !allowedChats.includes(chatId)) return
+      if (allowedChats && !allowedChats.includes(chatId)) {
+        console.log(`[telegram] Skipping — chat ${chatId} not in allowed list: ${allowedChats.join(',')}`)
+        return
+      }
 
       const inbound: InboundMessage = {
         platform: 'telegram',
@@ -49,11 +75,14 @@ const telegram: PlatformConnector = {
       }
     })
 
-    // Start polling
+    // Start polling — not awaited (runs in background)
     bot.start({
+      allowed_updates: ['message', 'edited_message'],
       onStart: (botInfo) => {
-        console.log(`[telegram] Bot started as @${botInfo.username}`)
+        console.log(`[telegram] Bot started as @${botInfo.username} — polling for updates`)
       },
+    }).catch((err) => {
+      console.error(`[telegram] Polling stopped with error:`, err.message || err)
     })
 
     return {

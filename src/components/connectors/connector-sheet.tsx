@@ -6,6 +6,20 @@ import { BottomSheet } from '@/components/shared/bottom-sheet'
 import { api } from '@/lib/api-client'
 import type { Connector, ConnectorPlatform } from '@/types'
 
+/** Auto-detect URLs in text and make them clickable links that open in a new tab */
+function linkify(text: string) {
+  const urlRegex = /(https?:\/\/[^\s,)]+)/gi
+  const parts = text.split(urlRegex)
+  if (parts.length === 1) return text
+  return parts.map((part, i) => {
+    if (urlRegex.test(part)) {
+      urlRegex.lastIndex = 0
+      return <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-accent-bright hover:underline">{part}</a>
+    }
+    return part
+  })
+}
+
 const PLATFORMS: {
   id: ConnectorPlatform
   label: string
@@ -22,11 +36,12 @@ const PLATFORMS: {
     color: '#5865F2',
     icon: 'DI',
     setupSteps: [
-      'Go to discord.com/developers/applications and create a new app',
+      'Go to https://discord.com/developers/applications and create a new app',
       'Under "Bot", click "Reset Token" and copy it',
       'Enable MESSAGE CONTENT intent under "Privileged Gateway Intents"',
-      'Under "OAuth2 > URL Generator", select "bot" scope with "Send Messages" + "Read Messages" permissions',
-      'Use the generated URL to invite the bot to your server',
+      'Under "OAuth2 > URL Generator", check the "bot" scope — a Bot Permissions panel will appear below',
+      'In Bot Permissions, check "Send Messages" and "Read Message History"',
+      'Copy the generated URL at the bottom and open it to invite the bot to your server',
     ],
     tokenLabel: 'Bot Token',
     tokenHelp: 'From Discord Developer Portal > Your App > Bot > Token',
@@ -56,11 +71,12 @@ const PLATFORMS: {
     color: '#4A154B',
     icon: 'SL',
     setupSteps: [
-      'Go to api.slack.com/apps and create a new app "From scratch"',
-      'Under "Socket Mode", enable it and generate an App-Level Token (xapp-...)',
-      'Under "OAuth & Permissions", add bot scopes: chat:write, app_mentions:read, channels:read, users:read',
-      'Under "Event Subscriptions", enable events and subscribe to: message.channels, app_mention',
-      'Install the app to your workspace and copy the Bot Token (xoxb-...)',
+      'Go to https://api.slack.com/apps and create a new app "From scratch"',
+      'Under "Socket Mode", enable it. Then go to "Basic Information > App-Level Tokens", generate a token with connections:write scope, and copy the xapp-... token',
+      'Under "OAuth & Permissions", add bot scopes: chat:write, channels:history, channels:read, im:history, im:read, users:read, app_mentions:read',
+      'Under "Event Subscriptions", enable events and subscribe to: message.channels, message.im, app_mention',
+      'Under "App Home", enable the Messages Tab and check "Allow users to send Slash commands and messages from the messages tab"',
+      'Install the app to your workspace and copy the Bot Token (xoxb-...) from OAuth & Permissions',
     ],
     tokenLabel: 'Bot Token (xoxb-...)',
     tokenHelp: 'From Slack App > OAuth & Permissions > Bot User OAuth Token',
@@ -109,6 +125,13 @@ export function ConnectorSheet() {
   const [actionLoading, setActionLoading] = useState(false)
   const [showSetup, setShowSetup] = useState(false)
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
+  const [waAuthenticated, setWaAuthenticated] = useState(false)
+  const [waHasCreds, setWaHasCreds] = useState(false)
+  const [waConnecting, setWaConnecting] = useState(false)
+  const [showNewCred, setShowNewCred] = useState(false)
+  const [newCredName, setNewCredName] = useState('')
+  const [newCredValue, setNewCredValue] = useState('')
+  const [savingCred, setSavingCred] = useState(false)
 
   const editing = editingId ? connectors[editingId] as Connector | undefined : null
 
@@ -120,6 +143,8 @@ export function ConnectorSheet() {
     }
   }, [open])
 
+  // Sync form fields when editing connector changes (by ID, not reference)
+  const editingIdRef = editing?.id ?? null
   useEffect(() => {
     if (editing) {
       setName(editing.name)
@@ -135,12 +160,15 @@ export function ConnectorSheet() {
       setConfig({})
     }
     setQrDataUrl(null)
-  }, [editing, open])
+    setWaAuthenticated(false)
+    setWaHasCreds(false)
+    setWaConnecting(false)
+  }, [editingIdRef, open])
 
-  // Poll for QR code when WhatsApp connector is running
+  // Poll for QR code when WhatsApp connector is running or connecting
+  const isWaRunning = editing?.platform === 'whatsapp' && (editing?.status === 'running' || waConnecting)
   useEffect(() => {
-    if (!editing || editing.platform !== 'whatsapp' || editing.status !== 'running') {
-      setQrDataUrl(null)
+    if (!editing || !isWaRunning) {
       return
     }
     let cancelled = false
@@ -149,15 +177,25 @@ export function ConnectorSheet() {
         const data = await api<any>('GET', `/connectors/${editing.id}`)
         if (!cancelled) {
           setQrDataUrl(data.qrDataUrl || null)
-          // Refresh connector list to update status (e.g. when pairing completes)
-          loadConnectors()
+          setWaAuthenticated(data.authenticated ?? false)
+          setWaHasCreds(data.hasCredentials ?? false)
+          // Sync store with the individual endpoint's runtime status
+          if (data.status === 'running' && editing.status !== 'running') {
+            // Store is stale — update it directly
+            const store = useAppStore.getState()
+            const updated = { ...store.connectors }
+            if (updated[editing.id]) {
+              updated[editing.id] = { ...updated[editing.id], status: 'running' as const }
+              useAppStore.setState({ connectors: updated })
+            }
+          }
         }
       } catch { /* ignore */ }
     }
     poll()
     const interval = setInterval(poll, 2000)
     return () => { cancelled = true; clearInterval(interval) }
-  }, [editing?.id, editing?.platform, editing?.status])
+  }, [editing?.id, isWaRunning])
 
   const handleSave = async () => {
     if (!agentId) return
@@ -183,8 +221,20 @@ export function ConnectorSheet() {
     setActionLoading(true)
     try {
       await api('PUT', `/connectors/${editing.id}`, { action })
+      if (action === 'start' && editing.platform === 'whatsapp') {
+        setWaConnecting(true)
+        setWaAuthenticated(false)
+        setQrDataUrl(null)
+        // Don't reset waHasCreds — it will be updated by poll
+      } else if (action === 'stop') {
+        setWaConnecting(false)
+        setWaAuthenticated(false)
+        setWaHasCreds(false)
+        setQrDataUrl(null)
+      }
       await loadConnectors()
     } catch (err: any) {
+      setWaConnecting(false)
       alert(`Failed to ${action}: ${err.message}`)
     } finally {
       setActionLoading(false)
@@ -286,7 +336,7 @@ export function ConnectorSheet() {
                 <span className="w-5 h-5 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] font-700 text-text-3 shrink-0 mt-0.5">
                   {i + 1}
                 </span>
-                <span className="text-[13px] text-text-2/80 leading-[1.5]">{step}</span>
+                <span className="text-[13px] text-text-2/80 leading-[1.5]">{linkify(step)}</span>
               </div>
             ))}
           </div>
@@ -310,7 +360,7 @@ export function ConnectorSheet() {
         <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">Route to Agent</label>
         <p className="text-[12px] text-text-3/60 mb-2">Incoming messages will be handled by this agent</p>
         <select
-          value={agentId}
+          value={agentId || ''}
           onChange={(e) => setAgentId(e.target.value)}
           className={`${inputClass} appearance-none cursor-pointer`}
           style={{ fontFamily: 'inherit' }}
@@ -327,56 +377,204 @@ export function ConnectorSheet() {
         <div className="mb-6">
           <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">{platformConfig.tokenLabel}</label>
           <p className="text-[12px] text-text-3/60 mb-2">{platformConfig.tokenHelp}</p>
-          <select
-            value={credentialId}
-            onChange={(e) => setCredentialId(e.target.value)}
-            className={`${inputClass} appearance-none cursor-pointer`}
-            style={{ fontFamily: 'inherit' }}
-          >
-            <option value="">Select saved credential...</option>
-            {credList.map((c: any) => (
-              <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
-            ))}
-          </select>
-          <p className="text-[11px] text-text-3/50 mt-1.5">
-            Save your bot token as a credential in Settings first
-          </p>
+          <div className="flex gap-2">
+            <select
+              value={credentialId}
+              onChange={(e) => {
+                if (e.target.value === '__new__') {
+                  setShowNewCred(true)
+                  setNewCredName(`${platformConfig.label} Bot Token`)
+                  setNewCredValue('')
+                } else {
+                  setCredentialId(e.target.value)
+                  setShowNewCred(false)
+                }
+              }}
+              className={`${inputClass} appearance-none cursor-pointer flex-1`}
+              style={{ fontFamily: 'inherit' }}
+            >
+              <option value="">Select credential...</option>
+              {credList.map((c: any) => (
+                <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
+              ))}
+              <option value="__new__">+ Add new key...</option>
+            </select>
+            {!showNewCred && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNewCred(true)
+                  setNewCredName(`${platformConfig.label} Bot Token`)
+                  setNewCredValue('')
+                }}
+                className="shrink-0 px-3 py-2.5 rounded-[10px] bg-accent-soft/50 text-accent-bright text-[12px] font-600 hover:bg-accent-soft transition-colors cursor-pointer border border-accent-bright/20"
+              >
+                + New
+              </button>
+            )}
+          </div>
+          {showNewCred && (
+            <div className="mt-3 p-4 rounded-[12px] border border-accent-bright/15 bg-accent-soft/20 space-y-3"
+              style={{ animation: 'fade-in 0.2s ease-out' }}>
+              <input
+                value={newCredName}
+                onChange={(e) => setNewCredName(e.target.value)}
+                placeholder="Key name (e.g. My Discord Bot)"
+                className={`${inputClass} !bg-surface text-[13px]`}
+                style={{ fontFamily: 'inherit' }}
+              />
+              <input
+                type="password"
+                value={newCredValue}
+                onChange={(e) => setNewCredValue(e.target.value)}
+                placeholder="Paste your token here..."
+                className={`${inputClass} !bg-surface font-mono text-[13px]`}
+                style={{ fontFamily: undefined }}
+              />
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowNewCred(false)}
+                  className="px-3 py-1.5 text-[12px] text-text-3 hover:text-text-2 transition-colors cursor-pointer bg-transparent border-none"
+                  style={{ fontFamily: 'inherit' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={savingCred || !newCredValue.trim()}
+                  onClick={async () => {
+                    setSavingCred(true)
+                    try {
+                      const cred = await api<any>('POST', '/credentials', {
+                        provider: platform,
+                        name: newCredName.trim() || `${platformConfig.label} Bot Token`,
+                        apiKey: newCredValue.trim(),
+                      })
+                      await loadCredentials()
+                      setCredentialId(cred.id)
+                      setShowNewCred(false)
+                      setNewCredName('')
+                      setNewCredValue('')
+                    } catch (err: any) {
+                      alert(`Failed to save: ${err.message}`)
+                    } finally {
+                      setSavingCred(false)
+                    }
+                  }}
+                  className="px-4 py-1.5 rounded-[8px] bg-accent-bright text-white text-[12px] font-600 cursor-pointer border-none hover:brightness-110 transition-all disabled:opacity-40"
+                  style={{ fontFamily: 'inherit' }}
+                >
+                  {savingCred ? 'Saving...' : 'Save Key'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Platform-specific config */}
-      {platformConfig.configFields.map((field) => (
-        <div key={field.key} className="mb-6">
-          <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
-            {field.label} <span className="normal-case tracking-normal font-normal text-text-3">(optional)</span>
-          </label>
-          {field.help && <p className="text-[12px] text-text-3/60 mb-2">{field.help}</p>}
-          <input
-            value={config[field.key] || ''}
-            onChange={(e) => setConfig({ ...config, [field.key]: e.target.value })}
-            placeholder={field.placeholder}
-            className={`${inputClass} font-mono text-[13px]`}
-            style={{ fontFamily: undefined }}
-          />
-        </div>
-      ))}
+      {platformConfig.configFields.map((field) => {
+        const isTagField = field.key === 'allowedJids' || field.key === 'channelIds' || field.key === 'chatIds'
+        if (isTagField) {
+          const tags = (config[field.key] || '').split(',').map((s) => s.trim()).filter(Boolean)
+          return (
+            <div key={field.key} className="mb-6">
+              <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
+                {field.label} <span className="normal-case tracking-normal font-normal text-text-3">(optional)</span>
+              </label>
+              {field.help && <p className="text-[12px] text-text-3/60 mb-2">{field.help}</p>}
+              <div className="flex flex-wrap gap-2 mb-2">
+                {tags.map((tag, i) => (
+                  <span key={i} className="flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-accent-soft/50 border border-accent-bright/20 text-[12px] font-mono text-accent-bright">
+                    {tag}
+                    <button
+                      onClick={() => {
+                        const next = tags.filter((_, j) => j !== i).join(',')
+                        setConfig({ ...config, [field.key]: next })
+                      }}
+                      className="ml-0.5 w-4 h-4 flex items-center justify-center rounded-full hover:bg-white/10 transition-colors cursor-pointer text-accent-bright/50 hover:text-accent-bright"
+                    >
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  id={`tag-input-${field.key}`}
+                  placeholder={field.placeholder}
+                  className={`${inputClass} font-mono text-[13px] flex-1`}
+                  style={{ fontFamily: undefined }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ',') {
+                      e.preventDefault()
+                      const input = e.currentTarget
+                      const val = input.value.trim().replace(/,/g, '')
+                      if (val) {
+                        const next = tags.length > 0 ? `${tags.join(',')},${val}` : val
+                        setConfig({ ...config, [field.key]: next })
+                        input.value = ''
+                      }
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const input = document.getElementById(`tag-input-${field.key}`) as HTMLInputElement
+                    const val = input?.value.trim().replace(/,/g, '')
+                    if (val) {
+                      const next = tags.length > 0 ? `${tags.join(',')},${val}` : val
+                      setConfig({ ...config, [field.key]: next })
+                      input.value = ''
+                    }
+                  }}
+                  className="px-4 py-2.5 rounded-[10px] bg-accent-soft/50 text-accent-bright text-[12px] font-600 hover:bg-accent-soft transition-colors cursor-pointer border border-accent-bright/20"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )
+        }
+        return (
+          <div key={field.key} className="mb-6">
+            <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-2">
+              {field.label} <span className="normal-case tracking-normal font-normal text-text-3">(optional)</span>
+            </label>
+            {field.help && <p className="text-[12px] text-text-3/60 mb-2">{field.help}</p>}
+            <input
+              value={config[field.key] || ''}
+              onChange={(e) => setConfig({ ...config, [field.key]: e.target.value })}
+              placeholder={field.placeholder}
+              className={`${inputClass} font-mono text-[13px]`}
+              style={{ fontFamily: undefined }}
+            />
+          </div>
+        )
+      })}
 
       {/* Start/Stop controls for editing */}
-      {editing && (
+      {editing && (() => {
+        const effectiveRunning = editing.status === 'running' || waConnecting
+        return (
         <div className="mb-6 p-4 rounded-[14px] border border-white/[0.06] bg-white/[0.01]">
           <div className="flex items-center justify-between">
             <div>
               <div className="text-[13px] font-600 text-text-2">Connection</div>
               <div className="text-[12px] text-text-3 mt-0.5 flex items-center gap-1.5">
                 <span className={`w-2 h-2 rounded-full inline-block ${
-                  editing.status === 'running' ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.5)]' :
+                  effectiveRunning ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.5)]' :
                   editing.status === 'error' ? 'bg-red-400' : 'bg-white/20'
                 }`} />
-                {editing.status === 'running' ? 'Connected and listening' :
+                {effectiveRunning ? (waAuthenticated ? 'Connected and listening' : 'Connecting...') :
                  editing.status === 'error' ? 'Error — see below' : 'Not connected'}
               </div>
             </div>
-            {editing.status === 'running' ? (
+            {effectiveRunning ? (
               <button
                 onClick={() => handleStartStop('stop')}
                 disabled={actionLoading}
@@ -397,10 +595,11 @@ export function ConnectorSheet() {
             )}
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* WhatsApp QR code */}
-      {editing && editing.platform === 'whatsapp' && editing.status === 'running' && qrDataUrl && (
+      {editing && editing.platform === 'whatsapp' && (editing.status === 'running' || waConnecting) && qrDataUrl && (
         <div className="mb-6 p-5 rounded-[14px] border border-white/[0.06] bg-white/[0.01] text-center"
           style={{ animation: 'fade-in 0.3s ease-out' }}>
           <div className="text-[13px] font-600 text-text-2 mb-1">Scan with WhatsApp</div>
@@ -414,11 +613,76 @@ export function ConnectorSheet() {
         </div>
       )}
 
-      {/* WhatsApp waiting for QR */}
-      {editing && editing.platform === 'whatsapp' && editing.status === 'running' && !qrDataUrl && (
+      {/* WhatsApp connected (authenticated, no QR) */}
+      {editing && editing.platform === 'whatsapp' && (editing.status === 'running' || waConnecting) && !qrDataUrl && waAuthenticated && (
         <div className="mb-6 p-5 rounded-[14px] border border-white/[0.06] bg-white/[0.01] text-center">
           <div className="text-[13px] font-600 text-green-400 mb-1">Connected</div>
-          <p className="text-[11px] text-text-3">WhatsApp is paired and listening for messages</p>
+          <p className="text-[11px] text-text-3 mb-3">WhatsApp is paired and listening for messages</p>
+          <button
+            onClick={async () => {
+              if (!confirm('Unlink this device? You will need to scan a new QR code.')) return
+              setActionLoading(true)
+              try {
+                await api('PUT', `/connectors/${editing.id}`, { action: 'repair' })
+                setWaAuthenticated(false)
+                setWaHasCreds(false)
+                setQrDataUrl(null)
+                setWaConnecting(true)
+                await loadConnectors()
+              } catch (err: any) {
+                alert(`Failed to unlink: ${err.message}`)
+              } finally {
+                setActionLoading(false)
+              }
+            }}
+            disabled={actionLoading}
+            className="text-[12px] text-text-3 hover:text-red-400 transition-colors cursor-pointer bg-transparent border-none underline underline-offset-2"
+            style={{ fontFamily: 'inherit' }}
+          >
+            Unlink device
+          </button>
+        </div>
+      )}
+
+      {/* WhatsApp waiting for QR / reconnecting (not yet authenticated, no QR yet) */}
+      {editing && editing.platform === 'whatsapp' && (editing.status === 'running' || waConnecting) && !qrDataUrl && !waAuthenticated && (
+        <div className="mb-6 p-5 rounded-[14px] border border-white/[0.06] bg-white/[0.01] text-center">
+          <div className="flex items-center justify-center gap-2 mb-1">
+            <span className="w-3 h-3 rounded-full border-2 border-[#3B82F6] border-t-transparent animate-spin" />
+            <span className="text-[13px] font-600 text-[#3B82F6]">
+              {waHasCreds ? 'Reconnecting...' : 'Waiting for QR code...'}
+            </span>
+          </div>
+          <p className="text-[11px] text-text-3">
+            {waHasCreds
+              ? 'Reconnecting with saved session, this should only take a moment'
+              : 'Connecting to WhatsApp, QR code will appear shortly'}
+          </p>
+          {waHasCreds && (
+            <button
+              onClick={async () => {
+                if (!confirm('Force re-pair? This will clear saved credentials and show a new QR code.')) return
+                setActionLoading(true)
+                try {
+                  await api('PUT', `/connectors/${editing.id}`, { action: 'repair' })
+                  setWaAuthenticated(false)
+                  setWaHasCreds(false)
+                  setQrDataUrl(null)
+                  setWaConnecting(true)
+                  await loadConnectors()
+                } catch (err: any) {
+                  alert(`Failed to re-pair: ${err.message}`)
+                } finally {
+                  setActionLoading(false)
+                }
+              }}
+              disabled={actionLoading}
+              className="mt-3 text-[12px] text-text-3 hover:text-amber-400 transition-colors cursor-pointer bg-transparent border-none underline underline-offset-2"
+              style={{ fontFamily: 'inherit' }}
+            >
+              Force re-pair with new QR code
+            </button>
+          )}
         </div>
       )}
 

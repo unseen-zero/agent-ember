@@ -8,12 +8,14 @@ import {
 import { getProvider } from '@/lib/providers'
 import { log } from '@/lib/server/logger'
 import { streamAgentChat } from '@/lib/server/stream-agent-chat'
+import type { MessageToolEvent } from '@/types'
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const { message, imagePath, imageUrl } = await req.json()
+  const { message, imagePath, imageUrl, internal } = await req.json()
+  const isInternal = internal === true
 
-  log.info('chat', `POST /sessions/${id}/chat`, { message: message?.slice(0, 100), imagePath, imageUrl })
+  log.info('chat', `POST /sessions/${id}/chat`, { message: message?.slice(0, 100), imagePath, imageUrl, internal: isInternal })
 
   const sessions = loadSessions()
   const session = sessions[id]
@@ -25,6 +27,24 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (active.has(id)) {
     log.warn('chat', `Session busy: ${id}`)
     return NextResponse.json({ error: 'Session is busy' }, { status: 409 })
+  }
+
+  // Sync session config from current agent (agent may have been updated since session creation)
+  if (session.agentId) {
+    const agents = loadAgents()
+    const agent = agents[session.agentId]
+    if (agent) {
+      let changed = false
+      if (agent.provider && agent.provider !== session.provider) { session.provider = agent.provider; changed = true }
+      if (agent.model !== undefined && agent.model !== session.model) { session.model = agent.model; changed = true }
+      if (agent.credentialId !== undefined && agent.credentialId !== session.credentialId) { session.credentialId = agent.credentialId ?? null; changed = true }
+      if (agent.apiEndpoint !== undefined && agent.apiEndpoint !== session.apiEndpoint) { session.apiEndpoint = agent.apiEndpoint ?? null; changed = true }
+      if (agent.tools && JSON.stringify(agent.tools) !== JSON.stringify(session.tools)) { session.tools = agent.tools; changed = true }
+      if (changed) {
+        log.info('chat', `Synced session ${id} config from agent ${agent.name}`, { provider: session.provider, model: session.model })
+        saveSessions(sessions)
+      }
+    }
   }
 
   const providerType = session.provider || 'claude-cli'
@@ -80,15 +100,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
   }
 
-  session.messages.push({
-    role: 'user',
-    text: message,
-    time: Date.now(),
-    imagePath: imagePath || undefined,
-    imageUrl: imageUrl || undefined,
-  })
-  session.lastActiveAt = Date.now()
-  saveSessions(sessions)
+  if (!isInternal) {
+    session.messages.push({
+      role: 'user',
+      text: message,
+      time: Date.now(),
+      imagePath: imagePath || undefined,
+      imageUrl: imageUrl || undefined,
+    })
+    session.lastActiveAt = Date.now()
+    saveSessions(sessions)
+  }
 
   // Resolve agent system prompt if this session has an agent
   // Injection order: [userPrompt] \n\n [soul] \n\n [systemPrompt]
@@ -125,17 +147,46 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     async start(controller) {
-      const write = (data: string) => {
+      const rawWrite = (data: string) => {
         controller.enqueue(encoder.encode(data))
       }
 
+      // Collect tool events for persistence
+      const collectedToolEvents: MessageToolEvent[] = []
+      const write = (data: string) => {
+        rawWrite(data)
+        if (data.startsWith('data: ')) {
+          try {
+            const ev = JSON.parse(data.slice(6).trim())
+            if (ev.t === 'tool_call') {
+              collectedToolEvents.push({ name: ev.toolName || 'unknown', input: ev.toolInput || '' })
+            } else if (ev.t === 'tool_result') {
+              const last = [...collectedToolEvents].reverse().find(e => e.name === (ev.toolName || 'unknown') && !e.output)
+              if (last) {
+                last.output = ev.toolOutput
+                const out = (ev.toolOutput || '').trim()
+                if (/^(Error:|error:)/i.test(out) || out.includes('ECONNREFUSED') || out.includes('ETIMEDOUT') || out.includes('Error:')) {
+                  last.error = true
+                }
+              }
+            }
+          } catch { /* not JSON, ignore */ }
+        }
+      }
+
+      // Track this session as active with an abort controller for cancellation
+      const abortController = new AbortController()
+      active.set(id, { kill: () => abortController.abort() })
+
       try {
-        const hasTools = session.tools?.length && session.provider !== 'claude-cli'
+        const cliProviders = ['claude-cli', 'codex-cli', 'opencode-cli']
+        const hasTools = session.tools?.length && !cliProviders.includes(session.provider)
 
         const fullResponse = hasTools
           ? await streamAgentChat({
               session,
               message,
+              imagePath,
               apiKey,
               systemPrompt,
               write,
@@ -154,12 +205,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
         log.info('chat', `Stream complete for ${id}`, { responseLen: typeof fullResponse === 'string' ? fullResponse.length : 0 })
 
-        if (typeof fullResponse === 'string' && fullResponse.trim()) {
-          session.messages.push({ role: 'assistant', text: fullResponse.trim(), time: Date.now() })
+        const trimmed = typeof fullResponse === 'string' ? fullResponse.trim() : ''
+        const shouldPersistAssistant = trimmed.length > 0
+          && (!isInternal || trimmed !== 'HEARTBEAT_OK')
+
+        if (shouldPersistAssistant) {
+          session.messages.push({
+            role: 'assistant',
+            text: trimmed,
+            time: Date.now(),
+            toolEvents: collectedToolEvents.length ? collectedToolEvents : undefined,
+          })
           session.lastActiveAt = Date.now()
           const s = loadSessions()
           s[id] = session
           saveSessions(s)
+        } else if (trimmed.length > 0) {
+          log.info('chat', `Skipped persistence for internal heartbeat ACK in ${id}`)
         } else {
           log.warn('chat', `Empty response from provider for ${id}`)
         }
@@ -167,6 +229,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         const errMsg = err instanceof Error ? err.message : String(err)
         log.error('chat', `streamChat threw for ${id}`, errMsg)
         write(`data: ${JSON.stringify({ t: 'err', text: errMsg })}\n\n`)
+      } finally {
+        active.delete(id)
       }
 
       write(`data: ${JSON.stringify({ t: 'done' })}\n\n`)

@@ -1,10 +1,14 @@
+import fs from 'fs'
 import http from 'http'
 import https from 'https'
 import type { StreamChatOptions } from './index'
 
-export function streamOllamaChat({ session, message, apiKey, write, active, loadHistory }: StreamChatOptions): Promise<string> {
+const IMAGE_EXTS = /\.(png|jpg|jpeg|gif|webp|bmp)$/i
+const TEXT_EXTS = /\.(txt|md|csv|json|xml|html|js|ts|tsx|jsx|py|go|rs|java|c|cpp|h|yml|yaml|toml|env|log|sh|sql|css|scss)$/i
+
+export function streamOllamaChat({ session, message, imagePath, apiKey, write, active, loadHistory }: StreamChatOptions): Promise<string> {
   return new Promise((resolve) => {
-    const messages = buildMessages(session, message, loadHistory)
+    const messages = buildMessages(session, message, imagePath, loadHistory)
     const model = session.model || 'llama3'
     // Cloud: no endpoint but API key present → use Ollama cloud
     const endpoint = session.apiEndpoint || (apiKey ? 'https://ollama.com' : 'http://localhost:11434')
@@ -92,16 +96,36 @@ export function streamOllamaChat({ session, message, apiKey, write, active, load
   })
 }
 
-function buildMessages(session: any, message: string, loadHistory: (id: string) => any[]) {
-  const msgs: Array<{ role: string; content: string }> = []
+function fileToOllamaMsg(text: string, filePath?: string): { content: string; images?: string[] } {
+  if (!filePath || !fs.existsSync(filePath)) return { content: text }
+  if (IMAGE_EXTS.test(filePath)) {
+    const data = fs.readFileSync(filePath).toString('base64')
+    return { content: text, images: [data] }
+  }
+  if (TEXT_EXTS.test(filePath) || filePath.endsWith('.pdf')) {
+    try {
+      const fileContent = fs.readFileSync(filePath, 'utf-8')
+      const name = filePath.split('/').pop() || 'file'
+      return { content: `[Attached file: ${name}]\n\n${fileContent}\n\n${text}` }
+    } catch { return { content: text } }
+  }
+  return { content: `[Attached file: ${filePath.split('/').pop()}]\n\n${text}` }
+}
+
+function buildMessages(session: any, message: string, imagePath: string | undefined, loadHistory: (id: string) => any[]) {
+  const msgs: Array<{ role: string; content: string; images?: string[] }> = []
 
   if (loadHistory) {
     const history = loadHistory(session.id)
     for (const m of history) {
-      msgs.push({ role: m.role, content: m.text })
+      if (m.role === 'user' && m.imagePath) {
+        msgs.push({ role: 'user', ...fileToOllamaMsg(m.text, m.imagePath) })
+      } else {
+        msgs.push({ role: m.role, content: m.text })
+      }
     }
   }
 
-  msgs.push({ role: 'user', content: message })
+  msgs.push({ role: 'user', ...fileToOllamaMsg(message, imagePath) })
   return msgs
 }

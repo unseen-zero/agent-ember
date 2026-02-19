@@ -1,6 +1,8 @@
 'use client'
 
 import type { Session } from '@/types'
+import { api } from '@/lib/api-client'
+import { useAppStore } from '@/stores/use-app-store'
 
 function timeAgo(ts: number): string {
   if (!ts) return ''
@@ -29,6 +31,14 @@ interface Props {
 }
 
 export function SessionCard({ session, active, onClick }: Props) {
+  const removeSession = useAppStore((s) => s.removeSession)
+
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    await api('DELETE', `/sessions/${session.id}`)
+    removeSession(session.id)
+  }
+
   const last = session.messages?.length
     ? session.messages[session.messages.length - 1]
     : null
@@ -40,7 +50,7 @@ export function SessionCard({ session, active, onClick }: Props) {
   return (
     <div
       onClick={onClick}
-      className={`relative py-3.5 px-4 cursor-pointer rounded-[14px]
+      className={`group/card relative py-3.5 px-4 cursor-pointer rounded-[14px]
         transition-all duration-200 active:scale-[0.98]
         ${active
           ? 'bg-accent-soft border border-accent-bright/10'
@@ -68,6 +78,16 @@ export function SessionCard({ session, active, onClick }: Props) {
         <span className="text-[11px] text-text-3/40 shrink-0 tabular-nums font-mono">
           {timeAgo(session.lastActiveAt)}
         </span>
+        <button
+          onClick={handleDelete}
+          className="shrink-0 opacity-0 group-hover/card:opacity-100 transition-opacity duration-150
+            text-text-3 hover:text-red-400 p-0.5 -mr-1 cursor-pointer bg-transparent border-none"
+          title="Delete session"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
       </div>
       <div className="text-[12px] text-text-3/40 font-mono mt-1.5 truncate">
         {shortPath(session.cwd)}

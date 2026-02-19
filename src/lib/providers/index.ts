@@ -1,4 +1,6 @@
 import { streamClaudeCliChat } from './claude-cli'
+import { streamCodexCliChat } from './codex-cli'
+import { streamOpenCodeCliChat } from './opencode-cli'
 import { streamOpenAiChat } from './openai'
 import { streamOllamaChat } from './ollama'
 import { streamAnthropicChat } from './anthropic'
@@ -28,11 +30,19 @@ interface BuiltinProviderConfig extends ProviderInfo {
 const PROVIDERS: Record<string, BuiltinProviderConfig> = {
   'claude-cli': {
     id: 'claude-cli',
-    name: 'Claude CLI',
+    name: 'Claude Code CLI',
     models: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-5-20250514'],
     requiresApiKey: false,
     requiresEndpoint: false,
     handler: { streamChat: streamClaudeCliChat },
+  },
+  'codex-cli': {
+    id: 'codex-cli',
+    name: 'OpenAI Codex CLI',
+    models: ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex', 'gpt-5-codex', 'gpt-5-codex-mini'],
+    requiresApiKey: false,
+    requiresEndpoint: false,
+    handler: { streamChat: streamCodexCliChat },
   },
   openai: {
     id: 'openai',
@@ -63,6 +73,133 @@ const PROVIDERS: Record<string, BuiltinProviderConfig> = {
         const patchedSession = {
           ...opts.session,
           apiEndpoint: opts.session.apiEndpoint || 'http://localhost:18789/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  'opencode-cli': {
+    id: 'opencode-cli',
+    name: 'OpenCode CLI',
+    models: ['claude-sonnet-4-6', 'gpt-4.1', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+    requiresApiKey: false,
+    requiresEndpoint: false,
+    handler: { streamChat: streamOpenCodeCliChat },
+  },
+  google: {
+    id: 'google',
+    name: 'Google Gemini',
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://generativelanguage.googleapis.com/v1beta/openai',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  deepseek: {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://api.deepseek.com/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://api.deepseek.com/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  groq: {
+    id: 'groq',
+    name: 'Groq',
+    models: ['llama-3.3-70b-versatile', 'deepseek-r1-distill-llama-70b', 'qwen-qwq-32b', 'gemma2-9b-it'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://api.groq.com/openai/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://api.groq.com/openai/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  together: {
+    id: 'together',
+    name: 'Together AI',
+    models: ['meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-72B-Instruct'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://api.together.xyz/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://api.together.xyz/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  mistral: {
+    id: 'mistral',
+    name: 'Mistral AI',
+    models: ['mistral-large-latest', 'mistral-small-latest', 'magistral-medium-2506', 'devstral-small-latest'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://api.mistral.ai/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://api.mistral.ai/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  xai: {
+    id: 'xai',
+    name: 'xAI (Grok)',
+    models: ['grok-3', 'grok-3-fast', 'grok-3-mini', 'grok-3-mini-fast'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://api.x.ai/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://api.x.ai/v1',
+        }
+        return streamOpenAiChat({ ...opts, session: patchedSession })
+      },
+    },
+  },
+  fireworks: {
+    id: 'fireworks',
+    name: 'Fireworks AI',
+    models: ['accounts/fireworks/models/deepseek-r1-0528', 'accounts/fireworks/models/llama-v3p3-70b-instruct', 'accounts/fireworks/models/qwen3-235b-a22b'],
+    requiresApiKey: true,
+    requiresEndpoint: false,
+    defaultEndpoint: 'https://api.fireworks.ai/inference/v1',
+    handler: {
+      streamChat: (opts) => {
+        const patchedSession = {
+          ...opts.session,
+          apiEndpoint: opts.session.apiEndpoint || 'https://api.fireworks.ai/inference/v1',
         }
         return streamOpenAiChat({ ...opts, session: patchedSession })
       },
@@ -100,8 +237,21 @@ function getCustomProviders(): Record<string, CustomProviderConfig> {
   }
 }
 
+function getModelOverrides(): Record<string, string[]> {
+  try {
+    const { loadModelOverrides } = require('../server/storage')
+    return loadModelOverrides()
+  } catch {
+    return {}
+  }
+}
+
 export function getProviderList(): ProviderInfo[] {
-  const builtins = Object.values(PROVIDERS).map(({ handler, ...info }) => info)
+  const overrides = getModelOverrides()
+  const builtins = Object.values(PROVIDERS).map(({ handler, ...info }) => ({
+    ...info,
+    models: overrides[info.id] || info.models,
+  }))
   const customs = Object.values(getCustomProviders())
     .filter((c) => c.isEnabled)
     .map((c) => ({
@@ -110,6 +260,7 @@ export function getProviderList(): ProviderInfo[] {
       models: c.models,
       requiresApiKey: c.requiresApiKey,
       requiresEndpoint: false,
+      defaultEndpoint: c.baseUrl,
     }))
   return [...builtins, ...customs]
 }

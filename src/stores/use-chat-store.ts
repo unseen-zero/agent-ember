@@ -17,7 +17,7 @@ export interface ToolEvent {
   name: string
   input: string
   output?: string
-  status: 'running' | 'done'
+  status: 'running' | 'done' | 'error'
 }
 
 export interface UsageInfo {
@@ -52,6 +52,7 @@ interface ChatState {
   setDebugOpen: (open: boolean) => void
 
   sendMessage: (text: string) => Promise<void>
+  sendHeartbeat: (sessionId: string) => Promise<void>
   stopStreaming: () => void
 }
 
@@ -137,7 +138,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             (e) => e.name === event.toolName && e.status === 'running',
           )
           if (idx !== -1) {
-            events[idx] = { ...events[idx], status: 'done', output: event.toolOutput }
+            const output = event.toolOutput || ''
+            const isError = /^(Error:|error:|ECONNREFUSED|ETIMEDOUT|timeout|failed)/i.test(output.trim())
+              || output.includes('ECONNREFUSED')
+              || output.includes('ETIMEDOUT')
+              || output.includes('Error:')
+            events[idx] = { ...events[idx], status: isError ? 'error' : 'done', output }
           }
           return { toolEvents: events }
         })
@@ -150,10 +156,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })
 
     if (fullText.trim()) {
+      const currentToolEvents = get().toolEvents
       const assistantMsg: Message = {
         role: 'assistant',
         text: fullText.trim(),
         time: Date.now(),
+        toolEvents: currentToolEvents.length ? currentToolEvents.map(e => ({
+          name: e.name,
+          input: e.input,
+          output: e.output,
+          error: e.status === 'error' || undefined,
+        })) : undefined,
       }
       set((s) => ({
         messages: [...s.messages, assistantMsg],
@@ -165,6 +178,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ streaming: false, streamText: '' })
     }
 
+    useAppStore.getState().loadSessions()
+  },
+
+  sendHeartbeat: async (sessionId: string) => {
+    if (!sessionId || get().streaming) return
+
+    const settings = useAppStore.getState().appSettings
+    const heartbeatPrompt = (settings.heartbeatPrompt || '').trim() || 'SWARM_HEARTBEAT_CHECK'
+
+    let fullText = ''
+    let sawError = false
+    let toolCallCounter = 0
+    const heartbeatToolEvents: ToolEvent[] = []
+
+    await streamChat(
+      sessionId,
+      heartbeatPrompt,
+      undefined,
+      undefined,
+      (event: SSEEvent) => {
+        if (event.t === 'd' || event.t === 'r') {
+          fullText += event.text || ''
+        } else if (event.t === 'md') {
+          // metadata only
+        } else if (event.t === 'tool_call') {
+          heartbeatToolEvents.push({
+            id: `hb-tc-${++toolCallCounter}`,
+            name: event.toolName || 'unknown',
+            input: event.toolInput || '',
+            status: 'running',
+          })
+        } else if (event.t === 'tool_result') {
+          const idx = heartbeatToolEvents.findLastIndex(
+            (e) => e.name === event.toolName && e.status === 'running',
+          )
+          if (idx !== -1) {
+            const output = event.toolOutput || ''
+            const isError = /^(Error:|error:|ECONNREFUSED|ETIMEDOUT|timeout|failed)/i.test(output.trim())
+              || output.includes('ECONNREFUSED')
+              || output.includes('ETIMEDOUT')
+              || output.includes('Error:')
+            heartbeatToolEvents[idx] = {
+              ...heartbeatToolEvents[idx],
+              status: isError ? 'error' : 'done',
+              output,
+            }
+          }
+        } else if (event.t === 'err') {
+          sawError = true
+        }
+      },
+      { internal: true },
+    )
+
+    const trimmed = fullText.trim()
+    if (!trimmed || trimmed === 'HEARTBEAT_OK' || sawError) return
+
+    const assistantMsg: Message = {
+      role: 'assistant',
+      text: trimmed,
+      time: Date.now(),
+      toolEvents: heartbeatToolEvents.length
+        ? heartbeatToolEvents.map((e) => ({
+            name: e.name,
+            input: e.input,
+            output: e.output,
+            error: e.status === 'error' || undefined,
+          }))
+        : undefined,
+    }
+
+    set((s) => ({ messages: [...s.messages, assistantMsg] }))
     useAppStore.getState().loadSessions()
   },
 

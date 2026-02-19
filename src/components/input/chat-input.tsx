@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from 'react'
 import { useChatStore } from '@/stores/use-chat-store'
+import { useAppStore } from '@/stores/use-app-store'
 import { uploadImage } from '@/lib/upload'
 import { useAutoResize } from '@/hooks/use-auto-resize'
 import { useSpeechRecognition } from '@/hooks/use-speech-recognition'
@@ -18,6 +19,7 @@ export function ChatInput({ streaming, onSend, onStop }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pendingImage = useChatStore((s) => s.pendingImage)
   const setPendingImage = useChatStore((s) => s.setPendingImage)
+  const speechRecognitionLang = useAppStore((s) => s.appSettings.speechRecognitionLang)
 
   const handleSend = useCallback(() => {
     const text = value.trim()
@@ -40,7 +42,10 @@ export function ChatInput({ streaming, onSend, onStop }: Props) {
     onSend(text)
   }, [onSend])
 
-  const { recording, toggle: toggleRecording, supported: micSupported } = useSpeechRecognition(handleVoice)
+  const { recording, toggle: toggleRecording, supported: micSupported, error: micError } = useSpeechRecognition(
+    handleVoice,
+    { lang: speechRecognitionLang || undefined },
+  )
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -84,11 +89,21 @@ export function ChatInput({ streaming, onSend, onStop }: Props) {
           {pendingImage && (
             <div className="flex items-center gap-2 px-5 pt-4">
               <div className="relative">
-                <img
-                  src={URL.createObjectURL(pendingImage.file)}
-                  alt="Preview"
-                  className="h-16 rounded-[10px] object-cover border border-white/[0.06]"
-                />
+                {pendingImage.file.type.startsWith('image/') ? (
+                  <img
+                    src={URL.createObjectURL(pendingImage.file)}
+                    alt="Preview"
+                    className="h-16 rounded-[10px] object-cover border border-white/[0.06]"
+                  />
+                ) : (
+                  <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] border border-white/[0.06] bg-white/[0.03]">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="text-text-3 shrink-0">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                    <span className="text-[13px] text-text-2 font-500 truncate max-w-[180px]">{pendingImage.file.name}</span>
+                  </div>
+                )}
                 <button
                   onClick={() => setPendingImage(null)}
                   className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full border border-white/10 bg-raised
@@ -182,10 +197,14 @@ export function ChatInput({ streaming, onSend, onStop }: Props) {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept="image/*,.pdf,.txt,.md,.csv,.json,.xml,.html,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.c,.cpp,.h,.yml,.yaml,.toml,.env,.log,.sh,.sql"
           onChange={handleFileChange}
           className="hidden"
         />
+
+        {micError && (
+          <p className="text-[11px] text-danger/80 mt-2 px-1">{micError}</p>
+        )}
       </div>
     </div>
   )
