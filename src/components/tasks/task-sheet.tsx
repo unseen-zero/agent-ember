@@ -5,6 +5,7 @@ import { useAppStore } from '@/stores/use-app-store'
 import { createTask, updateTask, deleteTask } from '@/lib/tasks'
 import { api } from '@/lib/api-client'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
+import { DirBrowser } from '@/components/shared/dir-browser'
 import type { BoardTask, TaskComment } from '@/types'
 
 function fmtTime(ts: number) {
@@ -32,10 +33,7 @@ export function TaskSheet() {
   const [images, setImages] = useState<string[]>([])
   const [uploading, setUploading] = useState(false)
   const [cwd, setCwd] = useState('')
-  const [dirSearch, setDirSearch] = useState('')
-
-  const dirs = useAppStore((s) => s.dirs)
-  const loadDirs = useAppStore((s) => s.loadDirs)
+  const [file, setFile] = useState<string | null>(null)
 
   const editing = editingId ? tasks[editingId] : null
   const orchestrators = Object.values(agents).filter((p) => p.isOrchestrator)
@@ -43,20 +41,20 @@ export function TaskSheet() {
   useEffect(() => {
     if (open) {
       loadAgents()
-      loadDirs()
       if (editing) {
         setTitle(editing.title)
         setDescription(editing.description)
         setAgentId(editing.agentId)
         setImages(editing.images || [])
         setCwd(editing.cwd || '')
+        setFile(editing.file || null)
       } else {
         setTitle('')
         setDescription('')
         setAgentId(orchestrators[0]?.id || '')
         setImages([])
         setCwd('')
-        setDirSearch('')
+        setFile(null)
       }
     }
   }, [open, editingId])
@@ -74,7 +72,7 @@ export function TaskSheet() {
   }
 
   const handleSave = async () => {
-    const payload = { title: title.trim() || 'Untitled Task', description, agentId, images, cwd: cwd || undefined } as any
+    const payload = { title: title.trim() || 'Untitled Task', description, agentId, images, cwd: cwd || undefined, file: file || undefined } as any
     if (editing) {
       await updateTask(editing.id, payload)
     } else {
@@ -228,39 +226,19 @@ export function TaskSheet() {
         <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">
           Directory <span className="normal-case tracking-normal font-normal text-text-3">(optional — project to work in)</span>
         </label>
-        {cwd ? (
-          <div className="flex items-center gap-2">
-            <span className="flex-1 px-4 py-3 rounded-[14px] border border-accent-bright/20 bg-accent-soft text-accent-bright text-[14px] font-mono truncate">
-              {cwd.replace(/^\/Users\/\w+/, '~')}
-            </span>
-            <button onClick={() => setCwd('')} className="px-3 py-3 rounded-[14px] border border-white/[0.08] bg-surface text-text-3 text-[13px] cursor-pointer hover:bg-surface-2 transition-colors" style={{ fontFamily: 'inherit' }}>
-              Clear
-            </button>
-          </div>
-        ) : (
-          <>
-            <input
-              type="text"
-              value={dirSearch}
-              onChange={(e) => setDirSearch(e.target.value)}
-              placeholder="Search directories..."
-              className={`${inputClass} mb-3`}
-              style={{ fontFamily: 'inherit' }}
-            />
-            <div className="grid grid-cols-3 gap-2 max-h-[120px] overflow-y-auto">
-              {(dirSearch ? dirs.filter((d) => d.name.toLowerCase().includes(dirSearch.toLowerCase())) : dirs).slice(0, 12).map((d) => (
-                <button
-                  key={d.path}
-                  onClick={() => { setCwd(d.path); if (!title) setTitle(d.name) }}
-                  className="py-2.5 px-3 rounded-[10px] text-center cursor-pointer transition-all border bg-surface border-white/[0.06] text-text-2 hover:bg-surface-2 text-[12px] font-600 truncate"
-                  style={{ fontFamily: 'inherit' }}
-                >
-                  {d.name}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
+        <DirBrowser
+          value={cwd || null}
+          file={file}
+          onChange={(dir, f) => {
+            setCwd(dir)
+            setFile(f ?? null)
+            if (!title) {
+              const dirName = dir.split('/').pop() || ''
+              setTitle(dirName)
+            }
+          }}
+          onClear={() => { setCwd(''); setFile(null) }}
+        />
       </div>
 
       {editing?.result && (

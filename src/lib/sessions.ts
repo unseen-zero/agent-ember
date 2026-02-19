@@ -17,11 +17,12 @@ export const createSession = (
   sessionType?: SessionType,
   agentId?: string | null,
   tools?: string[],
+  file?: string | null,
 ) =>
   api<Session>('POST', '/sessions', {
     name, cwd: cwd || undefined, user,
     provider, model, credentialId, apiEndpoint,
-    sessionType, agentId, tools,
+    sessionType, agentId, tools, file: file || undefined,
   })
 
 export const updateSession = (id: string, updates: Partial<Pick<Session, 'name' | 'cwd'>>) =>
@@ -39,7 +40,10 @@ export const clearMessages = (id: string) =>
 export const stopSession = (id: string) =>
   api<string>('POST', `/sessions/${id}/stop`)
 
-export const fetchDirs = () => api<Directory[]>('GET', '/dirs')
+export const fetchDirs = async () => {
+  const data = await api<{ dirs: Directory[] }>('GET', '/dirs')
+  return data.dirs
+}
 
 export const devServer = (id: string, action: 'start' | 'stop' | 'status') =>
   api<DevServerStatus>('POST', `/sessions/${id}/devserver`, { action })

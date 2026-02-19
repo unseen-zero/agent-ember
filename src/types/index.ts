@@ -45,6 +45,7 @@ export interface Session {
   agentId?: string | null
   parentSessionId?: string | null
   tools?: string[]
+  file?: string | null
 }
 
 export type Sessions = Record<string, Session>
@@ -238,6 +239,7 @@ export interface BoardTask {
   status: BoardTaskStatus
   agentId: string
   cwd?: string | null
+  file?: string | null
   sessionId?: string | null
   result?: string | null
   error?: string | null

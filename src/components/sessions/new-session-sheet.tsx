@@ -5,6 +5,7 @@ import { useAppStore } from '@/stores/use-app-store'
 import { useChatStore } from '@/stores/use-chat-store'
 import { createSession, createCredential } from '@/lib/sessions'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
+import { DirBrowser } from '@/components/shared/dir-browser'
 import type { ProviderType, SessionTool } from '@/types'
 
 export function NewSessionSheet() {
@@ -12,8 +13,8 @@ export function NewSessionSheet() {
   const setOpen = useAppStore((s) => s.setNewSessionOpen)
 
   const [name, setName] = useState('')
-  const [dirSearch, setDirSearch] = useState('')
   const [selectedDir, setSelectedDir] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [provider, setProvider] = useState<ProviderType>('claude-cli')
   const [model, setModel] = useState('')
   const [credentialId, setCredentialId] = useState<string | null>(null)
@@ -25,8 +26,6 @@ export function NewSessionSheet() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedTools, setSelectedTools] = useState<SessionTool[]>([])
 
-  const dirs = useAppStore((s) => s.dirs)
-  const loadDirs = useAppStore((s) => s.loadDirs)
   const providers = useAppStore((s) => s.providers)
   const loadProviders = useAppStore((s) => s.loadProviders)
   const credentials = useAppStore((s) => s.credentials)
@@ -43,13 +42,12 @@ export function NewSessionSheet() {
 
   useEffect(() => {
     if (open) {
-      loadDirs()
       loadProviders()
       loadCredentials()
       loadAgents()
       setName('')
-      setDirSearch('')
       setSelectedDir(null)
+      setSelectedFile(null)
       setProvider('claude-cli')
       setModel('')
       setCredentialId(null)
@@ -109,10 +107,6 @@ export function NewSessionSheet() {
     }
   }, [ollamaMode])
 
-  const filtered = dirSearch
-    ? dirs.filter((d) => d.name.toLowerCase().includes(dirSearch.toLowerCase()))
-    : dirs
-
   const handleAddKey = async () => {
     if (!newKeyValue.trim()) return
     const cred = await createCredential(provider, newKeyName || `${provider} key`, newKeyValue)
@@ -154,6 +148,7 @@ export function NewSessionSheet() {
       selectedAgentId ? 'human' : undefined,
       selectedAgentId,
       agentTools || undefined,
+      selectedFile,
     )
     updateSessionInStore(s)
     setCurrentSession(s.id)
@@ -423,32 +418,19 @@ export function NewSessionSheet() {
         <label className="block font-display text-[12px] font-600 text-text-2 uppercase tracking-[0.08em] mb-3">
           Directory {provider !== 'claude-cli' && <span className="normal-case tracking-normal font-normal text-text-3">(optional)</span>}
         </label>
-        <input
-          type="text"
-          value={dirSearch}
-          onChange={(e) => setDirSearch(e.target.value)}
-          placeholder="Search directories..."
-          className={`${inputClass} mb-4`}
-          style={{ fontFamily: 'inherit' }}
+        <DirBrowser
+          value={selectedDir}
+          file={selectedFile}
+          onChange={(dir, file) => {
+            setSelectedDir(dir)
+            setSelectedFile(file ?? null)
+            if (!name) {
+              const dirName = dir.split('/').pop() || ''
+              setName(dirName)
+            }
+          }}
+          onClear={() => { setSelectedDir(null); setSelectedFile(null) }}
         />
-        <div className="grid grid-cols-3 gap-2.5 max-h-[160px] overflow-y-auto rounded-[14px]">
-          {filtered.slice(0, 18).map((d) => (
-            <button
-              key={d.path}
-              onClick={() => {
-                setSelectedDir(d.path)
-                if (!name) setName(d.name)
-              }}
-              className={`py-3 px-3 rounded-[12px] text-center cursor-pointer transition-all duration-200
-                active:scale-[0.97] overflow-hidden border
-                ${selectedDir === d.path
-                  ? 'bg-accent-soft border-accent-bright/25 text-accent-bright'
-                  : 'bg-surface border-white/[0.06] text-text-2 hover:bg-surface-2 hover:border-white/[0.08]'}`}
-            >
-              <div className="text-[13px] font-600 truncate">{d.name}</div>
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* Actions */}
