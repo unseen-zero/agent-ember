@@ -2,12 +2,15 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  normalizeMessageContent,
+  downloadMediaMessage,
 } from '@whiskeysockets/baileys'
 import QRCode from 'qrcode'
 import path from 'path'
 import fs from 'fs'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
+import { saveInboundMediaBuffer } from './media'
 
 const AUTH_DIR = path.join(process.cwd(), 'data', 'whatsapp-auth')
 
@@ -57,6 +60,39 @@ const whatsapp: PlatformConnector = {
       qrDataUrl: null,
       authenticated: false,
       hasCredentials: hasStoredCreds(authDir),
+      async sendMessage(channelId, text, options) {
+        if (!sock) throw new Error('WhatsApp connector is not connected')
+        if (options?.imageUrl) {
+          const sent = await sock.sendMessage(channelId, {
+            image: { url: options.imageUrl },
+            caption: options.caption || text || undefined,
+          })
+          if (sent?.key?.id) sentMessageIds.add(sent.key.id)
+          return { messageId: sent?.key?.id || undefined }
+        }
+        if (options?.fileUrl) {
+          const sent = await sock.sendMessage(channelId, {
+            document: { url: options.fileUrl },
+            fileName: options.fileName || 'attachment',
+            mimetype: options.mimeType || 'application/octet-stream',
+            caption: options.caption || text || undefined,
+          })
+          if (sent?.key?.id) sentMessageIds.add(sent.key.id)
+          return { messageId: sent?.key?.id || undefined }
+        }
+
+        const payload = text || options?.caption || ''
+        const chunks = payload.length <= 4096 ? [payload] : (payload.match(/[\s\S]{1,4000}/g) || [payload])
+        let lastMessageId: string | undefined
+        for (const chunk of chunks) {
+          const sent = await sock.sendMessage(channelId, { text: chunk })
+          if (sent?.key?.id) {
+            lastMessageId = sent.key.id
+            sentMessageIds.add(sent.key.id)
+          }
+        }
+        return { messageId: lastMessageId }
+      },
       async stop() {
         stopped = true
         try { sock?.end(undefined) } catch { /* ignore */ }
@@ -204,10 +240,52 @@ const whatsapp: PlatformConnector = {
             }
           }
 
-          const text = msg.message?.conversation
-            || msg.message?.extendedTextMessage?.text
+          const content: any = normalizeMessageContent(msg.message as any) || msg.message || {}
+          const text = content?.conversation
+            || content?.extendedTextMessage?.text
+            || content?.imageMessage?.caption
+            || content?.videoMessage?.caption
+            || content?.documentMessage?.caption
             || ''
-          if (!text) continue
+
+          const media: NonNullable<InboundMessage['media']> = []
+          const mediaCandidate:
+            | { kind: 'image' | 'video' | 'audio' | 'document' | 'file'; payload: any }
+            | null =
+            content?.imageMessage
+              ? { kind: 'image', payload: content.imageMessage }
+              : content?.videoMessage
+                ? { kind: 'video', payload: content.videoMessage }
+                : content?.audioMessage
+                  ? { kind: 'audio', payload: content.audioMessage }
+                  : content?.documentMessage
+                    ? { kind: 'document', payload: content.documentMessage }
+                    : content?.stickerMessage
+                      ? { kind: 'image', payload: content.stickerMessage }
+                      : null
+
+          if (mediaCandidate) {
+            try {
+              const buffer = await downloadMediaMessage(msg as any, 'buffer', {})
+              const saved = saveInboundMediaBuffer({
+                connectorId: connector.id,
+                buffer: buffer as Buffer,
+                mediaType: mediaCandidate.kind,
+                mimeType: mediaCandidate.payload?.mimetype || undefined,
+                fileName: mediaCandidate.payload?.fileName || undefined,
+              })
+              media.push(saved)
+            } catch (err: any) {
+              console.error(`[whatsapp] Failed to decode media: ${err?.message || String(err)}`)
+              media.push({
+                type: mediaCandidate.kind,
+                fileName: mediaCandidate.payload?.fileName || undefined,
+                mimeType: mediaCandidate.payload?.mimetype || undefined,
+              })
+            }
+          }
+
+          if (!text && media.length === 0) continue
 
           const senderName = msg.pushName || jid.split('@')[0]
           const isGroup = jid.endsWith('@g.us')
@@ -220,7 +298,9 @@ const whatsapp: PlatformConnector = {
             channelName: isGroup ? jid : `DM:${senderName}`,
             senderId: msg.key.participant || jid,
             senderName,
-            text,
+            text: text || '(media message)',
+            imageUrl: media.find((m) => m.type === 'image')?.url,
+            media,
           }
 
           try {
@@ -228,19 +308,7 @@ const whatsapp: PlatformConnector = {
             const response = await onMessage(inbound)
             await sock!.sendPresenceUpdate('paused', jid)
 
-            // WhatsApp has a ~65K char limit but keep it reasonable
-            const sendAndTrack = async (text: string) => {
-              const sent = await sock!.sendMessage(jid, { text })
-              if (sent?.key?.id) sentMessageIds.add(sent.key.id)
-            }
-            if (response.length <= 4096) {
-              await sendAndTrack(response)
-            } else {
-              const chunks = response.match(/[\s\S]{1,4000}/g) || [response]
-              for (const chunk of chunks) {
-                await sendAndTrack(chunk)
-              }
-            }
+            await instance.sendMessage?.(jid, response)
           } catch (err: any) {
             console.error(`[whatsapp] Error handling message:`, err.message)
             try {

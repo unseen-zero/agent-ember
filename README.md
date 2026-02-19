@@ -23,17 +23,17 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 - **15 Built-in Providers** — Claude Code CLI, OpenAI Codex CLI, OpenCode CLI, Anthropic, OpenAI, Google Gemini, DeepSeek, Groq, Together AI, Mistral AI, xAI (Grok), Fireworks AI, Ollama, OpenClaw, plus custom OpenAI-compatible endpoints
 - **OpenClaw Integration** — Connect to remote [OpenClaw](https://github.com/openclaw/openclaw) instances as providers. Control a swarm of autonomous AI agents from a single dashboard
 - **Agent Builder** — Create agents with custom personalities (soul), system prompts, tools, and skills. AI-powered generation from a description
-- **Agent Tools** — Shell, process control for long-running commands, files, edit file, send file, web search, web fetch, Claude Code delegation, Playwright browser automation, and persistent memory
+- **Agent Tools** — Shell, process control for long-running commands, files, edit file, send file, web search, web fetch, CLI delegation (Claude/Codex/OpenCode), Playwright browser automation, and persistent memory
 - **Platform Tools** — Agents can manage other agents, tasks, schedules, skills, connectors, sessions, and encrypted secrets via built-in platform tools
 - **Orchestration** — Multi-agent workflows powered by LangGraph with automatic sub-agent routing
 - **Agentic Execution Policy** — Tool-first autonomous action loop with progress updates, evidence-driven answers, and better use of platform tools for long-lived work
 - **Task Board** — Queue and track agent tasks with status, comments, and results
-- **Background Daemon** — Auto-processes queued tasks and scheduled jobs with a 30s heartbeat
+- **Background Daemon** — Auto-processes queued tasks and scheduled jobs with a 30s heartbeat plus recurring health monitoring
 - **Scheduling** — Cron-based agent scheduling with human-friendly presets
 - **Loop Runtime Controls** — Switch between bounded and ongoing loops with configurable step caps, runtime guards, heartbeat cadence, and timeout budgets
 - **Session Run Queue** — Per-session queued runs with followup/steer/collect modes and run-state APIs
 - **Voice Settings** — Per-instance ElevenLabs API key + voice ID for TTS replies, plus configurable speech recognition language for chat input
-- **Chat Connectors** — Bridge agents to Discord, Slack, Telegram, and WhatsApp
+- **Chat Connectors** — Bridge agents to Discord, Slack, Telegram, and WhatsApp with media-aware inbound handling
 - **Skills System** — Discover local skills, import skills from URL, and load OpenClaw `SKILL.md` files (frontmatter-compatible)
 - **Memory** — Per-agent and per-session memory with hybrid FTS5 + vector embeddings search
 - **Cost Tracking** — Per-message token counting and cost estimation displayed in the chat header
@@ -172,6 +172,13 @@ Bridge any agent to a chat platform:
 | Telegram | grammy | Bot token from @BotFather |
 | WhatsApp | baileys | QR code pairing (shown in browser) |
 
+Connector sessions preserve attachment visibility in chat context:
+- WhatsApp media is decoded and persisted to `/api/uploads/...` when possible
+- Telegram and Slack attachments are downloaded to uploads when possible
+- Discord attachments are captured as media metadata/URLs
+
+For proactive outreach, `connector_message_tool` supports text plus optional `imageUrl` / `fileUrl` payloads (platform support varies).
+
 ## Agent Tools
 
 Agents can use the following tools when enabled:
@@ -181,10 +188,11 @@ Agents can use the following tools when enabled:
 | Shell | Execute commands in the session working directory |
 | Process | Control long-running shell commands (`process_tool`) |
 | Files | Read, write, list, and send files |
+| Copy/Move/Delete File | Optional file ops (`copy_file`, `move_file`, `delete_file`) configurable per agent/session (`delete_file` is off by default) |
 | Edit File | Search-and-replace editing (exact match required) |
 | Web Search | Search the web via DuckDuckGo HTML scraping |
 | Web Fetch | Fetch and extract text content from URLs (uses cheerio) |
-| Claude Code | Delegate complex tasks to Claude Code CLI |
+| CLI Delegation | Delegate complex tasks to Claude Code, Codex CLI, or OpenCode CLI |
 | Browser | Playwright-powered web browsing via MCP (navigate, click, type, screenshot, PDF) |
 | Memory | Store and retrieve long-term memories with FTS5 + vector search |
 
@@ -198,6 +206,8 @@ Agents with platform tools enabled can manage the SwarmClaw instance:
 | Manage Tasks | Create and manage task board items with agent assignment |
 | Manage Schedules | Create cron, interval, or one-time scheduled jobs |
 | Manage Skills | List, create, update reusable skill definitions |
+| Manage Documents | Upload/search/get/delete indexed docs for lightweight RAG workflows |
+| Manage Webhooks | Register external webhook endpoints that trigger agent sessions |
 | Manage Connectors | Manage chat platform bridges |
 | Manage Sessions | Enable `sessions_tool` for list/history/status/send/spawn/stop |
 | Manage Secrets | Store and retrieve encrypted reusable secrets |
@@ -222,7 +232,7 @@ Token usage and estimated costs are tracked per message for API-based providers 
 
 ## Background Daemon
 
-The daemon auto-processes queued tasks from the scheduler on a 30-second interval. Toggle it from the sidebar indicator or via API.
+The daemon auto-processes queued tasks from the scheduler on a 30-second interval. It also runs recurring health checks that detect stale heartbeat sessions and can send proactive WhatsApp alerts when issues are detected. Toggle the daemon from the sidebar indicator or via API.
 
 - **API:** `GET /api/daemon` (status), `POST /api/daemon` with `{"action": "start"}` or `{"action": "stop"}`
 - Auto-starts on boot if queued tasks are found

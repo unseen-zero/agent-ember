@@ -1,6 +1,7 @@
 import { App, LogLevel } from '@slack/bolt'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
+import { downloadInboundMediaToUpload, inferInboundMediaType } from './media'
 
 const slack: PlatformConnector = {
   async start(connector, botToken, onMessage): Promise<ConnectorInstance> {
@@ -92,13 +93,48 @@ const slack: PlatformConnector = {
         channelName = (channelInfo.channel as any)?.name || channelId
       } catch { /* use ID as fallback */ }
 
+      const media: NonNullable<InboundMessage['media']> = []
+      if (Array.isArray(msg.files)) {
+        for (const f of msg.files as any[]) {
+          const mediaType = inferInboundMediaType(f?.mimetype, f?.name, 'document')
+          const sourceUrl = f?.url_private_download || f?.url_private || f?.permalink_public || f?.permalink
+          if (typeof sourceUrl === 'string' && /^https?:\/\//i.test(sourceUrl)) {
+            try {
+              const stored = await downloadInboundMediaToUpload({
+                connectorId: connector.id,
+                mediaType,
+                url: sourceUrl,
+                headers: { Authorization: `Bearer ${botToken}` },
+                fileName: f?.name || undefined,
+                mimeType: f?.mimetype || undefined,
+              })
+              if (stored) {
+                media.push(stored)
+                continue
+              }
+            } catch (err: any) {
+              console.warn(`[slack] Media download failed (${f?.name || 'file'}):`, err?.message || String(err))
+            }
+          }
+          media.push({
+            type: mediaType,
+            fileName: f?.name || undefined,
+            mimeType: f?.mimetype || undefined,
+            sizeBytes: typeof f?.size === 'number' ? f.size : undefined,
+            url: typeof sourceUrl === 'string' ? sourceUrl : undefined,
+          })
+        }
+      }
+
       const inbound: InboundMessage = {
         platform: 'slack',
         channelId,
         channelName,
         senderId: msg.user,
         senderName,
-        text: msg.text || '',
+        text: msg.text || (media.length > 0 ? '(media message)' : ''),
+        imageUrl: media.find((m) => m.type === 'image')?.url,
+        media,
       }
 
       try {

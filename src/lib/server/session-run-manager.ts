@@ -1,7 +1,9 @@
 import crypto from 'crypto'
 import type { SSEEvent } from '@/types'
-import { active, loadSessions } from './storage'
+import { active } from './storage'
 import { executeSessionChatTurn, type ExecuteChatTurnResult } from './chat-execution'
+import { loadRuntimeSettings } from './runtime-settings'
+import { log } from './logger'
 
 export type SessionRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type SessionQueueMode = 'followup' | 'steer' | 'collect'
@@ -78,30 +80,26 @@ function registerRun(run: SessionRunRecord) {
 }
 
 function emitRunMeta(entry: QueueEntry, status: SessionRunStatus, extra?: Record<string, unknown>) {
-  entry.onEvent?.({
-    t: 'md',
-    text: JSON.stringify({
-      run: {
-        id: entry.run.id,
-        sessionId: entry.run.sessionId,
-        status,
-        source: entry.run.source,
-        internal: entry.run.internal,
-        ...extra,
-      },
-    }),
-  })
+  try {
+    entry.onEvent?.({
+      t: 'md',
+      text: JSON.stringify({
+        run: {
+          id: entry.run.id,
+          sessionId: entry.run.sessionId,
+          status,
+          source: entry.run.source,
+          internal: entry.run.internal,
+          ...extra,
+        },
+      }),
+    })
+  } catch {
+    // Stream may already be closed on the consumer side.
+  }
 }
 
 function executionKeyForSession(sessionId: string): string {
-  try {
-    const sessions = loadSessions() as Record<string, any>
-    const session = sessions[sessionId]
-    const agentId = session?.agentId
-    if (agentId && typeof agentId === 'string') return `agent:${agentId}`
-  } catch {
-    // Ignore and fall back to session lock.
-  }
   return `session:${sessionId}`
 }
 
@@ -151,6 +149,13 @@ async function drainExecution(executionKey: string): Promise<void> {
   next.run.status = 'running'
   next.run.startedAt = now()
   emitRunMeta(next, 'running')
+  log.info('session-run', `Run started ${next.run.id}`, {
+    sessionId: next.run.sessionId,
+    source: next.run.source,
+    internal: next.run.internal,
+    mode: next.run.mode,
+    timeoutMs: next.maxRuntimeMs || null,
+  })
 
   let runtimeTimer: ReturnType<typeof setTimeout> | null = null
   if (next.maxRuntimeMs && next.maxRuntimeMs > 0) {
@@ -182,6 +187,14 @@ async function drainExecution(executionKey: string): Promise<void> {
       hasText: !!result.text,
       error: result.error || null,
     })
+    log.info('session-run', `Run finished ${next.run.id}`, {
+      sessionId: next.run.sessionId,
+      status: next.run.status,
+      persisted: result.persisted,
+      hasText: !!result.text,
+      error: result.error || null,
+      durationMs: (next.run.endedAt || now()) - (next.run.startedAt || now()),
+    })
     next.resolve(result)
   } catch (err: any) {
     const aborted = next.signalController.signal.aborted
@@ -189,6 +202,12 @@ async function drainExecution(executionKey: string): Promise<void> {
     next.run.endedAt = now()
     next.run.error = err?.message || String(err)
     emitRunMeta(next, next.run.status, { error: next.run.error })
+    log.error('session-run', `Run failed ${next.run.id}`, {
+      sessionId: next.run.sessionId,
+      status: next.run.status,
+      error: next.run.error,
+      durationMs: (next.run.endedAt || now()) - (next.run.startedAt || now()),
+    })
     next.reject(err instanceof Error ? err : new Error(next.run.error))
   } finally {
     if (runtimeTimer) clearTimeout(runtimeTimer)
@@ -230,6 +249,11 @@ export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSession
   const internal = input.internal === true
   const mode = normalizeMode(input.mode, internal)
   const executionKey = executionKeyForSession(input.sessionId)
+  const runtime = loadRuntimeSettings()
+  const defaultMaxRuntimeMs = runtime.ongoingLoopMaxRuntimeMs ?? (10 * 60_000)
+  const effectiveMaxRuntimeMs = typeof input.maxRuntimeMs === 'number'
+    ? input.maxRuntimeMs
+    : defaultMaxRuntimeMs
 
   const dedupe = findDedupeMatch(input.sessionId, input.dedupeKey)
   if (dedupe) {
@@ -280,7 +304,7 @@ export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSession
     imageUrl: input.imageUrl,
     onEvent: input.onEvent,
     signalController: new AbortController(),
-    maxRuntimeMs: input.maxRuntimeMs,
+    maxRuntimeMs: effectiveMaxRuntimeMs > 0 ? effectiveMaxRuntimeMs : undefined,
     resolve,
     reject,
     promise,

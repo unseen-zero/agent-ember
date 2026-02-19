@@ -5,7 +5,7 @@ import {
 } from '../storage'
 import { streamAgentChat } from '../stream-agent-chat'
 import type { Connector } from '@/types'
-import type { ConnectorInstance, InboundMessage } from './types'
+import type { ConnectorInstance, InboundMessage, InboundMedia } from './types'
 
 /** Map of running connector instances by connector ID.
  *  Stored on globalThis to survive HMR reloads in dev mode —
@@ -13,6 +13,11 @@ import type { ConnectorInstance, InboundMessage } from './types'
 const globalKey = '__swarmclaw_running_connectors__' as const
 const running: Map<string, ConnectorInstance> =
   (globalThis as any)[globalKey] ?? ((globalThis as any)[globalKey] = new Map<string, ConnectorInstance>())
+
+/** Most recent inbound channel per connector (used for proactive replies/default outbound target) */
+const lastInboundKey = '__swarmclaw_connector_last_inbound__' as const
+const lastInboundChannelByConnector: Map<string, string> =
+  (globalThis as any)[lastInboundKey] ?? ((globalThis as any)[lastInboundKey] = new Map<string, string>())
 
 /** Per-connector lock to prevent concurrent start/stop operations */
 const lockKey = '__swarmclaw_connector_locks__' as const
@@ -30,8 +35,38 @@ async function getPlatform(platform: string) {
   }
 }
 
+function formatMediaLine(media: InboundMedia): string {
+  const typeLabel = media.type.toUpperCase()
+  const name = media.fileName || media.mimeType || 'attachment'
+  const size = media.sizeBytes ? ` (${Math.max(1, Math.round(media.sizeBytes / 1024))} KB)` : ''
+  if (media.url) return `- ${typeLabel}: ${name}${size} -> ${media.url}`
+  return `- ${typeLabel}: ${name}${size}`
+}
+
+function formatInboundUserText(msg: InboundMessage): string {
+  const baseText = (msg.text || '').trim()
+  const lines: string[] = []
+  if (baseText) lines.push(`[${msg.senderName}] ${baseText}`)
+  else lines.push(`[${msg.senderName}]`)
+
+  if (Array.isArray(msg.media) && msg.media.length > 0) {
+    lines.push('')
+    lines.push('Media received:')
+    const preview = msg.media.slice(0, 6)
+    for (const media of preview) lines.push(formatMediaLine(media))
+    if (msg.media.length > preview.length) {
+      lines.push(`- ...and ${msg.media.length - preview.length} more attachment(s)`)
+    }
+  }
+
+  return lines.join('\n').trim()
+}
+
 /** Route an inbound message through the assigned agent and return the response */
 async function routeMessage(connector: Connector, msg: InboundMessage): Promise<string> {
+  if (msg?.channelId) {
+    lastInboundChannelByConnector.set(connector.id, msg.channelId)
+  }
   const agents = loadAgents()
   const agent = agents[connector.agentId]
   if (!agent) return '[Error] Connector agent not found.'
@@ -91,10 +126,13 @@ async function routeMessage(connector: Connector, msg: InboundMessage): Promise<
   const systemPrompt = promptParts.join('\n\n')
 
   // Add message to session
+  const firstImageUrl = msg.imageUrl || msg.media?.find((m) => m.type === 'image' && m.url)?.url
+  const inboundText = formatInboundUserText(msg)
   session.messages.push({
     role: 'user',
-    text: `[${msg.senderName}] ${msg.text}`,
+    text: inboundText,
     time: Date.now(),
+    imageUrl: firstImageUrl || undefined,
   })
   session.lastActiveAt = Date.now()
   const s1 = loadSessions()
@@ -322,5 +360,115 @@ export async function autoStartConnectors(): Promise<void> {
         console.error(`[connector] Failed to auto-start ${connector.name}:`, err.message)
       }
     }
+  }
+}
+
+/** List connector IDs that are currently running (optionally by platform) */
+export function listRunningConnectors(platform?: string): Array<{
+  id: string
+  name: string
+  platform: string
+  supportsSend: boolean
+  configuredTargets: string[]
+  recentChannelId: string | null
+}> {
+  const connectors = loadConnectors()
+  const out: Array<{
+    id: string
+    name: string
+    platform: string
+    supportsSend: boolean
+    configuredTargets: string[]
+    recentChannelId: string | null
+  }> = []
+
+  for (const [id, instance] of running.entries()) {
+    const connector = connectors[id] as Connector | undefined
+    if (!connector) continue
+    if (platform && connector.platform !== platform) continue
+    const configuredTargets: string[] = []
+    if (connector.platform === 'whatsapp') {
+      const outboundJid = connector.config?.outboundJid?.trim()
+      if (outboundJid) configuredTargets.push(outboundJid)
+      const allowed = connector.config?.allowedJids?.split(',').map((s) => s.trim()).filter(Boolean) || []
+      configuredTargets.push(...allowed)
+    }
+    out.push({
+      id,
+      name: connector.name,
+      platform: connector.platform,
+      supportsSend: typeof instance.sendMessage === 'function',
+      configuredTargets: Array.from(new Set(configuredTargets)),
+      recentChannelId: lastInboundChannelByConnector.get(id) || null,
+    })
+  }
+
+  return out
+}
+
+/** Get the most recent inbound channel id seen for a connector */
+export function getConnectorRecentChannelId(connectorId: string): string | null {
+  return lastInboundChannelByConnector.get(connectorId) || null
+}
+
+/**
+ * Send an outbound message through a running connector.
+ * Intended for proactive agent notifications (e.g. WhatsApp updates).
+ */
+export async function sendConnectorMessage(params: {
+  connectorId?: string
+  platform?: string
+  channelId: string
+  text: string
+  imageUrl?: string
+  fileUrl?: string
+  mimeType?: string
+  fileName?: string
+  caption?: string
+}): Promise<{ connectorId: string; platform: string; channelId: string; messageId?: string }> {
+  const connectors = loadConnectors()
+  const requestedId = params.connectorId?.trim()
+  let connector: Connector | undefined
+  let connectorId: string | undefined
+
+  if (requestedId) {
+    connector = connectors[requestedId] as Connector | undefined
+    connectorId = requestedId
+    if (!connector) throw new Error(`Connector not found: ${requestedId}`)
+  } else {
+    const candidates = Object.values(connectors) as Connector[]
+    const filtered = candidates.filter((c) => {
+      if (params.platform && c.platform !== params.platform) return false
+      return running.has(c.id)
+    })
+    if (!filtered.length) {
+      throw new Error(`No running connector found${params.platform ? ` for platform "${params.platform}"` : ''}.`)
+    }
+    connector = filtered[0]
+    connectorId = connector.id
+  }
+
+  if (!connector || !connectorId) throw new Error('Connector resolution failed.')
+
+  const instance = running.get(connectorId)
+  if (!instance) {
+    throw new Error(`Connector "${connectorId}" is not running.`)
+  }
+  if (typeof instance.sendMessage !== 'function') {
+    throw new Error(`Connector "${connector.name}" (${connector.platform}) does not support outbound sends.`)
+  }
+
+  const result = await instance.sendMessage(params.channelId, params.text, {
+    imageUrl: params.imageUrl,
+    fileUrl: params.fileUrl,
+    mimeType: params.mimeType,
+    fileName: params.fileName,
+    caption: params.caption,
+  })
+  return {
+    connectorId,
+    platform: connector.platform,
+    channelId: params.channelId,
+    messageId: result?.messageId,
   }
 }

@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
 import { useChatStore } from '@/stores/use-chat-store'
 import { SessionCard } from './session-card'
@@ -19,16 +19,25 @@ export function SessionList({ inSidebar, onSelect }: Props) {
   const currentSessionId = useAppStore((s) => s.currentSessionId)
   const setCurrentSession = useAppStore((s) => s.setCurrentSession)
   const loadSessions = useAppStore((s) => s.loadSessions)
+  const loadConnectors = useAppStore((s) => s.loadConnectors)
   const setNewSessionOpen = useAppStore((s) => s.setNewSessionOpen)
   const clearSessions = useAppStore((s) => s.clearSessions)
   const setMessages = useChatStore((s) => s.setMessages)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<SessionFilter>('all')
 
+  useEffect(() => {
+    void loadConnectors()
+  }, [loadConnectors])
+
   const allUserSessions = useMemo(() => {
     return Object.values(sessions).filter((s) => {
       if (s.name === '__main__') return false
-      if (s.user !== currentUser && !((!s.user) && currentUser === 'wayde') && s.user !== 'system') return false
+      const owner = (s.user || '').toLowerCase()
+      const isPlatformOwned = owner === 'system' || owner === 'connector' || owner === 'swarm'
+      const isCurrentUserOwned = !!currentUser && owner === currentUser.toLowerCase()
+      const isUnownedLegacy = !owner
+      if (!isCurrentUserOwned && !isPlatformOwned && !isUnownedLegacy) return false
       return true
     })
   }, [sessions, currentUser])

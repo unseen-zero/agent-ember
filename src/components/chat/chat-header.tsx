@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import type { Session } from '@/types'
 import { useAppStore } from '@/stores/use-app-store'
 import { useChatStore } from '@/stores/use-chat-store'
@@ -8,6 +8,11 @@ import { IconButton } from '@/components/shared/icon-button'
 import { UsageBadge } from '@/components/shared/usage-badge'
 import { ChatToolToggles } from './chat-tool-toggles'
 import { api } from '@/lib/api-client'
+import {
+  ConnectorPlatformIcon,
+  CONNECTOR_PLATFORM_META,
+  getSessionConnector,
+} from '@/components/shared/connector-platform-icon'
 
 function shortPath(p: string): string {
   return (p || '').replace(/^\/Users\/\w+/, '~')
@@ -44,8 +49,12 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen)
   const appSettings = useAppStore((s) => s.appSettings)
   const loadSessions = useAppStore((s) => s.loadSessions)
+  const connectors = useAppStore((s) => s.connectors)
+  const loadConnectors = useAppStore((s) => s.loadConnectors)
   const providerLabel = PROVIDER_LABELS[session.provider] || session.provider
   const agent = session.agentId ? agents[session.agentId] : null
+  const connector = getSessionConnector(session, connectors)
+  const connectorMeta = connector ? CONNECTOR_PLATFORM_META[connector.platform] : null
   const modelName = session.model || agent?.model || ''
   const [copied, setCopied] = useState(false)
   const [heartbeatSaving, setHeartbeatSaving] = useState(false)
@@ -55,13 +64,33 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
     return Object.values(tasks).find((t) => t.sessionId === session.id)
   }, [tasks, session.id])
 
-  const cliProviders = ['claude-cli', 'codex-cli', 'opencode-cli']
-  const isCliSession = cliProviders.includes(session.provider)
-  const cliSessionId = isCliSession ? session.claudeSessionId : null
+  const resumeHandle = useMemo(() => {
+    const fromSessionClaude = session.claudeSessionId
+      ? { label: 'Claude', id: session.claudeSessionId, command: `claude --resume ${session.claudeSessionId}` }
+      : null
+    const fromSessionCodex = session.codexThreadId
+      ? { label: 'Codex', id: session.codexThreadId, command: `codex exec resume ${session.codexThreadId}` }
+      : null
+    const fromDelegateClaude = session.delegateResumeIds?.claudeCode
+      ? { label: 'Claude', id: session.delegateResumeIds.claudeCode, command: `claude --resume ${session.delegateResumeIds.claudeCode}` }
+      : null
+    const fromDelegateCodex = session.delegateResumeIds?.codex
+      ? { label: 'Codex', id: session.delegateResumeIds.codex, command: `codex exec resume ${session.delegateResumeIds.codex}` }
+      : null
+    const fromDelegateOpenCode = session.delegateResumeIds?.opencode
+      ? { label: 'OpenCode', id: session.delegateResumeIds.opencode, command: session.delegateResumeIds.opencode }
+      : null
+    return fromSessionClaude
+      || fromSessionCodex
+      || fromDelegateClaude
+      || fromDelegateCodex
+      || fromDelegateOpenCode
+      || null
+  }, [session.claudeSessionId, session.codexThreadId, session.delegateResumeIds])
 
   const handleCopySessionId = () => {
-    if (!cliSessionId) return
-    navigator.clipboard.writeText(`claude --resume ${cliSessionId}`)
+    if (!resumeHandle) return
+    navigator.clipboard.writeText(resumeHandle.command)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -98,6 +127,12 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
     }
   }
 
+  useEffect(() => {
+    if (session.name.startsWith('connector:')) {
+      void loadConnectors()
+    }
+  }, [session.name, loadConnectors])
+
   return (
     <header className="relative z-20 flex flex-col border-b border-white/[0.04] bg-bg/80 backdrop-blur-md shrink-0"
       style={mobile ? { paddingTop: 'max(12px, env(safe-area-inset-top))' } : undefined}>
@@ -112,6 +147,20 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2.5">
             <span className="font-display text-[16px] font-600 block truncate tracking-[-0.02em]">{session.name === '__main__' ? 'Main Chat' : session.name}</span>
+            {connector && connectorMeta && (
+              <span
+                className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[7px] border text-[10px] font-700 uppercase tracking-wider"
+                style={{
+                  color: connectorMeta.color,
+                  backgroundColor: `${connectorMeta.color}1A`,
+                  borderColor: `${connectorMeta.color}33`,
+                }}
+                title={`${connector.name} connector`}
+              >
+                <ConnectorPlatformIcon platform={connector.platform} size={11} />
+                {connectorMeta.label}
+              </span>
+            )}
             {session.provider && session.provider !== 'claude-cli' && (
               <span className="shrink-0 px-2.5 py-0.5 rounded-[7px] bg-accent-soft text-accent-bright text-[10px] font-700 uppercase tracking-wider">
                 {providerLabel}
@@ -179,7 +228,7 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
       </div>
 
       {/* Sub-bar: tools toggle + agent memories + task link + CLI session ID + browser */}
-      {(agent || linkedTask || cliSessionId || browserActive || session.tools?.length) && (
+      {(agent || linkedTask || resumeHandle || browserActive || session.tools?.length) && (
         <div className="flex items-center gap-3 px-5 pb-2.5 -mt-1">
           {(((agent?.tools?.length ?? 0) > 0) || ((session.tools?.length ?? 0) > 0)) && (
             <ChatToolToggles session={session} />
@@ -244,19 +293,19 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
               </span>
             </button>
           )}
-          {cliSessionId && (
+          {resumeHandle && (
             <button
               onClick={handleCopySessionId}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-white/[0.04] hover:bg-white/[0.07] transition-colors cursor-pointer group"
-              title="Copy resume command to clipboard"
+              title="Copy resume handle/command to clipboard"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-text-3/50">
                 <path d="M4 17l6 0l0 -6" />
                 <path d="M20 7l-6 0l0 6" />
                 <path d="M4 17l10 -10" />
               </svg>
-              <span className="text-[11px] font-mono text-text-3/50 group-hover:text-text-3/70 truncate max-w-[180px]">
-                {copied ? 'Copied!' : cliSessionId}
+              <span className="text-[11px] font-mono text-text-3/50 group-hover:text-text-3/70 truncate max-w-[220px]">
+                {copied ? 'Copied!' : `${resumeHandle.label}: ${resumeHandle.id}`}
               </span>
               {!copied && (
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-text-3/30 shrink-0">

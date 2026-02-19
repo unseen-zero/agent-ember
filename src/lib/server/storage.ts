@@ -29,6 +29,8 @@ const COLLECTIONS = [
   'provider_configs',
   'skills',
   'connectors',
+  'documents',
+  'webhooks',
   'model_overrides',
 ] as const
 
@@ -83,6 +85,8 @@ const JSON_FILES: Record<string, string> = {
   provider_configs: path.join(DATA_DIR, 'providers.json'),
   skills: path.join(DATA_DIR, 'skills.json'),
   connectors: path.join(DATA_DIR, 'connectors.json'),
+  documents: path.join(DATA_DIR, 'documents.json'),
+  webhooks: path.join(DATA_DIR, 'webhooks.json'),
 }
 
 const MIGRATION_FLAG = path.join(DATA_DIR, '.sqlite_migrated')
@@ -159,6 +163,22 @@ migrateFromJson()
 
 // Seed default agent if agents table is empty
 {
+  const defaultStarterTools = [
+    'memory',
+    'files',
+    'web_search',
+    'web_fetch',
+    'browser',
+    'manage_agents',
+    'manage_tasks',
+    'manage_schedules',
+    'manage_skills',
+    'manage_connectors',
+    'manage_sessions',
+    'manage_secrets',
+    'manage_documents',
+    'manage_webhooks',
+  ]
   const count = (db.prepare('SELECT COUNT(*) as c FROM agents').get() as { c: number }).c
   if (count === 0) {
     const defaultAgent = {
@@ -187,6 +207,8 @@ You have access to platform management tools. Here's how to use them:
 - **manage_tasks**: Create and manage task board items. Set "agentId" to assign a task to an agent, "status" to track progress (backlog → queued → running → completed/failed). Use action "create" with data like \`{"title": "...", "description": "...", "agentId": "...", "status": "backlog"}\`.
 - **manage_schedules**: Create recurring or one-time scheduled jobs. Set "scheduleType" to "cron", "interval", or "once". Provide "taskPrompt" for what the agent should do and "agentId" for who runs it.
 - **manage_skills**: List, create, or update reusable skill definitions that can be attached to agents.
+- **manage_documents**: Upload/index/search long-lived docs (PDFs, markdown, notes) for retrieval.
+- **manage_webhooks**: Register external webhook endpoints that trigger agent runs.
 - **manage_connectors**: Manage chat platform bridges (Discord, Slack, Telegram, WhatsApp).
 - **manage_sessions**: Session-level operations. Use \`sessions_tool\` to list sessions, send inter-session messages, spawn new agent sessions, and inspect status/history.
 - **manage_secrets**: Store and retrieve encrypted service tokens/API credentials for durable reuse.
@@ -195,7 +217,7 @@ You have access to platform management tools. Here's how to use them:
 Be concise and helpful. When users ask how to do something, guide them to the specific UI location and explain the steps.`,
       soul: '',
       isOrchestrator: false,
-      tools: ['memory', 'manage_agents', 'manage_tasks', 'manage_schedules', 'manage_skills', 'manage_connectors', 'manage_sessions', 'manage_secrets'],
+      tools: defaultStarterTools,
       platformAssignScope: 'all',
       skillIds: [],
       subAgentIds: [],
@@ -203,6 +225,101 @@ Be concise and helpful. When users ask how to do something, guide them to the sp
       updatedAt: Date.now(),
     }
     db.prepare(`INSERT OR REPLACE INTO agents (id, data) VALUES (?, ?)`).run('default', JSON.stringify(defaultAgent))
+  } else {
+    const row = db.prepare('SELECT data FROM agents WHERE id = ?').get('default') as { data: string } | undefined
+    if (row?.data) {
+      try {
+        const existing = JSON.parse(row.data) as Record<string, any>
+        const existingTools = Array.isArray(existing.tools) ? existing.tools : []
+        const mergedTools = Array.from(new Set([...existingTools, ...defaultStarterTools])).filter((t) => t !== 'delete_file')
+        if (JSON.stringify(existingTools) !== JSON.stringify(mergedTools)) {
+          existing.tools = mergedTools
+          existing.updatedAt = Date.now()
+          db.prepare('UPDATE agents SET data = ? WHERE id = ?').run(JSON.stringify(existing), 'default')
+        }
+      } catch {
+        // ignore malformed default agent payloads
+      }
+    }
+  }
+}
+
+// Backfill/seed a practical CodeReviewer agent profile.
+{
+  const REVIEWER_SOUL = 'You are CodeReviewer: a rigorous, concise software reviewer who prioritizes correctness, security, regressions, and test gaps over stylistic commentary.'
+  const REVIEWER_PROMPT = [
+    'You are a senior code review specialist.',
+    'Primary objective: find bugs, behavioral regressions, security risks, and missing tests.',
+    'When reviewing work:',
+    '- Lead with concrete findings ordered by severity.',
+    '- Include file references and explain user impact.',
+    '- Call out risky assumptions and edge cases.',
+    '- If no critical findings exist, explicitly say so and list residual risks.',
+    'Keep feedback direct and actionable.',
+  ].join('\n')
+  const REVIEWER_TOOLS = ['files', 'edit_file', 'web_search', 'web_fetch', 'memory']
+
+  const rows = db.prepare('SELECT id, data FROM agents').all() as { id: string; data: string }[]
+  let found = false
+  for (const row of rows) {
+    let parsed: Record<string, any>
+    try {
+      parsed = JSON.parse(row.data)
+    } catch {
+      continue
+    }
+    const name = String(parsed?.name || '').toLowerCase()
+    const isReviewer = row.id === 'code-reviewer'
+      || name === 'codereviewer'
+      || name === 'code reviewer'
+    if (!isReviewer) continue
+
+    found = true
+    const currentTools = Array.isArray(parsed.tools) ? parsed.tools : []
+    const mergedTools = Array.from(new Set([...currentTools, ...REVIEWER_TOOLS]))
+
+    let changed = false
+    if (!String(parsed.description || '').trim()) {
+      parsed.description = 'Finds defects, regressions, and test gaps with actionable recommendations.'
+      changed = true
+    }
+    if (!String(parsed.soul || '').trim()) {
+      parsed.soul = REVIEWER_SOUL
+      changed = true
+    }
+    if (!String(parsed.systemPrompt || '').trim()) {
+      parsed.systemPrompt = REVIEWER_PROMPT
+      changed = true
+    }
+    if (JSON.stringify(currentTools) !== JSON.stringify(mergedTools)) {
+      parsed.tools = mergedTools
+      changed = true
+    }
+    if (changed) {
+      parsed.updatedAt = Date.now()
+      db.prepare('UPDATE agents SET data = ? WHERE id = ?').run(JSON.stringify(parsed), row.id)
+    }
+  }
+
+  if (!found) {
+    const now = Date.now()
+    const seeded = {
+      id: 'code-reviewer',
+      name: 'CodeReviewer',
+      description: 'Finds defects, regressions, and test gaps with actionable recommendations.',
+      provider: 'ollama',
+      model: 'glm-5',
+      systemPrompt: REVIEWER_PROMPT,
+      soul: REVIEWER_SOUL,
+      isOrchestrator: false,
+      tools: REVIEWER_TOOLS,
+      platformAssignScope: 'self',
+      skillIds: [],
+      subAgentIds: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    db.prepare('INSERT OR REPLACE INTO agents (id, data) VALUES (?, ?)').run(seeded.id, JSON.stringify(seeded))
   }
 }
 
@@ -416,6 +533,24 @@ export function loadConnectors(): Record<string, any> {
 
 export function saveConnectors(c: Record<string, any>) {
   saveCollection('connectors', c)
+}
+
+// --- Documents ---
+export function loadDocuments(): Record<string, any> {
+  return loadCollection('documents')
+}
+
+export function saveDocuments(d: Record<string, any>) {
+  saveCollection('documents', d)
+}
+
+// --- Webhooks ---
+export function loadWebhooks(): Record<string, any> {
+  return loadCollection('webhooks')
+}
+
+export function saveWebhooks(w: Record<string, any>) {
+  saveCollection('webhooks', w)
 }
 
 // --- Active processes ---

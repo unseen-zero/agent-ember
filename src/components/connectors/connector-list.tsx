@@ -3,14 +3,8 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
 import { api } from '@/lib/api-client'
-import type { Connector, ConnectorPlatform } from '@/types'
-
-const PLATFORM_ICONS: Record<ConnectorPlatform, { color: string; label: string }> = {
-  discord: { color: '#5865F2', label: 'Discord' },
-  telegram: { color: '#229ED9', label: 'Telegram' },
-  slack: { color: '#4A154B', label: 'Slack' },
-  whatsapp: { color: '#25D366', label: 'WhatsApp' },
-}
+import type { Connector } from '@/types'
+import { ConnectorPlatformBadge, getConnectorPlatformLabel } from '@/components/shared/connector-platform-icon'
 
 export function ConnectorList({ inSidebar }: { inSidebar?: boolean }) {
   const connectors = useAppStore((s) => s.connectors)
@@ -72,7 +66,7 @@ export function ConnectorList({ inSidebar }: { inSidebar?: boolean }) {
         </div>
       )}
       {list.map((c) => {
-        const platform = PLATFORM_ICONS[c.platform]
+        const platformLabel = getConnectorPlatformLabel(c.platform)
         const agent = agents[c.agentId]
         const isRunning = c.status === 'running'
         const isToggling = toggling === c.id
@@ -88,12 +82,7 @@ export function ConnectorList({ inSidebar }: { inSidebar?: boolean }) {
               onClick={() => { setEditingConnectorId(c.id); setConnectorSheetOpen(true) }}
               className="flex items-center gap-3 flex-1 min-w-0 cursor-pointer bg-transparent border-none text-left p-0"
             >
-              <div
-                className="w-9 h-9 rounded-[10px] flex items-center justify-center shrink-0 text-white text-[11px] font-700"
-                style={{ backgroundColor: platform.color }}
-              >
-                {platform.label.slice(0, 2).toUpperCase()}
-              </div>
+              <ConnectorPlatformBadge platform={c.platform} size={36} iconSize={16} />
 
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
@@ -108,7 +97,7 @@ export function ConnectorList({ inSidebar }: { inSidebar?: boolean }) {
                 <div className="text-[11px] text-text-3 truncate">
                   {c.lastError
                     ? <span className="text-red-400">{c.lastError.slice(0, 60)}{c.lastError.length > 60 ? '...' : ''}</span>
-                    : <>{platform.label} {agent ? `\u2192 ${agent.name}` : ''}</>
+                    : <>{platformLabel} {agent ? `\u2192 ${agent.name}` : ''}</>
                   }
                 </div>
               </div>

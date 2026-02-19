@@ -1,36 +1,78 @@
-import { loadQueue, loadSchedules } from './storage'
+import { loadQueue, loadSchedules, loadSessions } from './storage'
 import { processNext } from './queue'
 import { startScheduler, stopScheduler } from './scheduler'
 import { sweepOrphanedBrowsers, getActiveBrowserCount } from './session-tools'
-import { autoStartConnectors, stopAllConnectors } from './connectors/manager'
+import { autoStartConnectors, stopAllConnectors, listRunningConnectors, sendConnectorMessage } from './connectors/manager'
 import { startHeartbeatService, stopHeartbeatService, getHeartbeatServiceStatus } from './heartbeat-service'
 
 const QUEUE_CHECK_INTERVAL = 30_000 // 30 seconds
 const BROWSER_SWEEP_INTERVAL = 60_000 // 60 seconds
 const BROWSER_MAX_AGE = 10 * 60 * 1000 // 10 minutes idle = orphaned
+const HEALTH_CHECK_INTERVAL = 120_000 // 2 minutes
+const HEALTH_ALERT_COOLDOWN_MS = 10 * 60 * 1000 // 10 minutes per unique issue
+
+function parseHeartbeatIntervalSec(value: unknown, fallback = 120): number {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number.parseInt(value, 10)
+      : Number.NaN
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.max(0, Math.min(3600, Math.trunc(parsed)))
+}
+
+function normalizeWhatsappTarget(raw?: string | null): string | null {
+  const input = (raw || '').trim()
+  if (!input) return null
+  if (input.includes('@')) return input
+  let digits = input.replace(/[^\d+]/g, '')
+  if (digits.startsWith('+')) digits = digits.slice(1)
+  if (digits.startsWith('0') && digits.length >= 10) {
+    digits = `44${digits.slice(1)}`
+  }
+  digits = digits.replace(/[^\d]/g, '')
+  return digits ? `${digits}@s.whatsapp.net` : null
+}
 
 // Store daemon state on globalThis to survive HMR reloads
 const gk = '__swarmclaw_daemon__' as const
 const ds: {
   queueIntervalId: ReturnType<typeof setInterval> | null
   browserSweepId: ReturnType<typeof setInterval> | null
+  healthIntervalId: ReturnType<typeof setInterval> | null
+  issueLastAlertAt: Map<string, number>
   running: boolean
   lastProcessedAt: number | null
 } = (globalThis as any)[gk] ?? ((globalThis as any)[gk] = {
   queueIntervalId: null,
   browserSweepId: null,
+  healthIntervalId: null,
+  issueLastAlertAt: new Map<string, number>(),
   running: false,
   lastProcessedAt: null,
 })
 
+// Backfill fields for hot-reloaded daemon state objects from older code versions.
+if (!ds.issueLastAlertAt) ds.issueLastAlertAt = new Map<string, number>()
+if (ds.healthIntervalId === undefined) ds.healthIntervalId = null
+
 export function startDaemon() {
-  if (ds.running) return
+  if (ds.running) {
+    // In dev/HMR, daemon can already be flagged running while new interval types
+    // (for example health monitor) were introduced in newer code.
+    startQueueProcessor()
+    startBrowserSweep()
+    startHealthMonitor()
+    startHeartbeatService()
+    return
+  }
   ds.running = true
   console.log('[daemon] Starting daemon (scheduler + queue processor + heartbeat)')
 
   startScheduler()
   startQueueProcessor()
   startBrowserSweep()
+  startHealthMonitor()
   startHeartbeatService()
 
   // Auto-start enabled connectors
@@ -47,6 +89,7 @@ export function stopDaemon() {
   stopScheduler()
   stopQueueProcessor()
   stopBrowserSweep()
+  stopHealthMonitor()
   stopHeartbeatService()
   stopAllConnectors().catch(() => {})
 }
@@ -92,6 +135,69 @@ function stopQueueProcessor() {
   }
 }
 
+async function sendHealthAlert(issueKey: string, text: string) {
+  const now = Date.now()
+  const last = ds.issueLastAlertAt.get(issueKey) || 0
+  if (now - last < HEALTH_ALERT_COOLDOWN_MS) return
+  ds.issueLastAlertAt.set(issueKey, now)
+
+  console.warn(`[health] ${text}`)
+  try {
+    const running = listRunningConnectors('whatsapp')
+    if (!running.length) return
+    const candidate = running[0]
+    const target = candidate.recentChannelId
+      || normalizeWhatsappTarget(candidate.configuredTargets[0] || null)
+    if (!target) return
+    await sendConnectorMessage({
+      connectorId: candidate.id,
+      channelId: target,
+      text: `⚠️ SwarmClaw health alert: ${text}`,
+    })
+  } catch {
+    // alerts are best effort; log-only fallback is acceptable
+  }
+}
+
+async function runHealthChecks() {
+  const sessions = loadSessions()
+  const now = Date.now()
+
+  for (const session of Object.values(sessions) as any[]) {
+    if (!session?.id) continue
+    if (session.heartbeatEnabled !== true) continue
+
+    const intervalSec = parseHeartbeatIntervalSec(session.heartbeatIntervalSec, 120)
+    if (intervalSec <= 0) continue
+    const staleAfter = Math.max(intervalSec * 4000, 4 * 60 * 1000) // 4x interval, min 4 minutes
+    const lastActive = typeof session.lastActiveAt === 'number' ? session.lastActiveAt : 0
+    if (lastActive <= 0) continue
+
+    if (now - lastActive > staleAfter) {
+      await sendHealthAlert(
+        `heartbeat-stale:${session.id}`,
+        `Session "${session.name || session.id}" heartbeat appears stale (last active ${(Math.round((now - lastActive) / 1000))}s ago, interval ${intervalSec}s).`,
+      )
+    }
+  }
+}
+
+function startHealthMonitor() {
+  if (ds.healthIntervalId) return
+  ds.healthIntervalId = setInterval(() => {
+    runHealthChecks().catch((err) => {
+      console.error('[daemon] Health monitor tick failed:', err?.message || String(err))
+    })
+  }, HEALTH_CHECK_INTERVAL)
+}
+
+function stopHealthMonitor() {
+  if (ds.healthIntervalId) {
+    clearInterval(ds.healthIntervalId)
+    ds.healthIntervalId = null
+  }
+}
+
 export function getDaemonStatus() {
   const queue = loadQueue()
   const schedules = loadSchedules()
@@ -113,6 +219,11 @@ export function getDaemonStatus() {
     lastProcessed: ds.lastProcessedAt,
     nextScheduled,
     heartbeat: getHeartbeatServiceStatus(),
+    health: {
+      monitorActive: !!ds.healthIntervalId,
+      trackedIssues: ds.issueLastAlertAt.size,
+      checkIntervalSec: Math.trunc(HEALTH_CHECK_INTERVAL / 1000),
+    },
   }
 }
 

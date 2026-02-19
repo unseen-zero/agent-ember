@@ -5,6 +5,7 @@ import { useAppStore } from '@/stores/use-app-store'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
 import { api } from '@/lib/api-client'
 import type { Connector, ConnectorPlatform } from '@/types'
+import { ConnectorPlatformBadge } from '@/components/shared/connector-platform-icon'
 
 /** Auto-detect URLs in text and make them clickable links that open in a new tab */
 function linkify(text: string) {
@@ -24,7 +25,6 @@ const PLATFORMS: {
   id: ConnectorPlatform
   label: string
   color: string
-  icon: string
   setupSteps: string[]
   tokenLabel: string
   tokenHelp: string
@@ -34,7 +34,6 @@ const PLATFORMS: {
     id: 'discord',
     label: 'Discord',
     color: '#5865F2',
-    icon: 'DI',
     setupSteps: [
       'Go to https://discord.com/developers/applications and create a new app',
       'Under "Bot", click "Reset Token" and copy it',
@@ -53,7 +52,6 @@ const PLATFORMS: {
     id: 'telegram',
     label: 'Telegram',
     color: '#229ED9',
-    icon: 'TG',
     setupSteps: [
       'Message @BotFather on Telegram',
       'Send /newbot and follow the prompts to create a bot',
@@ -69,7 +67,6 @@ const PLATFORMS: {
     id: 'slack',
     label: 'Slack',
     color: '#4A154B',
-    icon: 'SL',
     setupSteps: [
       'Go to https://api.slack.com/apps and create a new app "From scratch"',
       'Under "Socket Mode", enable it. Then go to "Basic Information > App-Level Tokens", generate a token with connections:write scope, and copy the xapp-... token',
@@ -89,7 +86,6 @@ const PLATFORMS: {
     id: 'whatsapp',
     label: 'WhatsApp',
     color: '#25D366',
-    icon: 'WA',
     setupSteps: [
       'No token needed — WhatsApp uses QR code pairing',
       'When you start this connector, a QR code will appear in the server terminal',
@@ -100,6 +96,7 @@ const PLATFORMS: {
     tokenHelp: '',
     configFields: [
       { key: 'allowedJids', label: 'Allowed Numbers/Groups', placeholder: '1234567890,MyGroup', help: 'Leave empty to respond to all messages' },
+      { key: 'outboundJid', label: 'Default Outbound Recipient', placeholder: '15551234567 or 15551234567@s.whatsapp.net', help: 'Used by connector_message_tool when the agent sends proactive WhatsApp updates without an explicit "to" value' },
     ],
   },
 ]
@@ -279,10 +276,7 @@ export function ConnectorSheet() {
                     : 'bg-transparent border-white/[0.04] hover:border-white/[0.08] hover:bg-white/[0.01]'}`}
                 style={{ fontFamily: 'inherit' }}
               >
-                <div className="w-10 h-10 rounded-[10px] flex items-center justify-center text-white text-[12px] font-800 shrink-0"
-                  style={{ backgroundColor: p.color }}>
-                  {p.icon}
-                </div>
+                <ConnectorPlatformBadge platform={p.id} size={40} iconSize={18} />
                 <div>
                   <div className={`text-[14px] font-600 ${platform === p.id ? 'text-text' : 'text-text-2'}`}>{p.label}</div>
                   <div className="text-[11px] text-text-3 mt-0.5">
@@ -298,10 +292,7 @@ export function ConnectorSheet() {
       {/* Editing: show platform badge */}
       {editing && (
         <div className="mb-6 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-[10px] flex items-center justify-center text-white text-[12px] font-800"
-            style={{ backgroundColor: platformConfig.color }}>
-            {platformConfig.icon}
-          </div>
+          <ConnectorPlatformBadge platform={platformConfig.id} size={40} iconSize={18} />
           <div>
             <div className="text-[14px] font-600 text-text">{platformConfig.label}</div>
             <div className="flex items-center gap-2 mt-0.5">

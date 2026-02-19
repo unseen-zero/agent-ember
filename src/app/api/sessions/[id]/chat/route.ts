@@ -24,8 +24,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     start(controller) {
+      let closed = false
       const writeEvent = (event: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+        if (closed) return
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+        } catch {
+          closed = true
+        }
       }
 
       const run = enqueueSessionRun({
@@ -67,8 +73,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         })
         .finally(() => {
           writeEvent({ t: 'done' })
-          controller.close()
+          if (!closed) {
+            try { controller.close() } catch { /* stream already closed */ }
+            closed = true
+          }
         })
+    },
+    cancel() {
+      // Client disconnected; subsequent writes should be ignored.
     },
   })
 

@@ -26,19 +26,23 @@ function buildToolCapabilityLines(enabledTools: string[]): string[] {
   const lines: string[] = []
   if (enabledTools.includes('shell')) lines.push('- Shell execution is available (`execute_command`). Use it for real checks/build/test steps.')
   if (enabledTools.includes('process')) lines.push('- Process control is available (`process_tool`) for long-running commands (poll/log/write/kill).')
-  if (enabledTools.includes('files')) lines.push('- File operations are available (`read_file`, `write_file`, `list_files`, `send_file`). Use them to inspect and produce artifacts.')
+  if (enabledTools.includes('files') || enabledTools.includes('copy_file') || enabledTools.includes('move_file') || enabledTools.includes('delete_file')) {
+    lines.push('- File operations are available (`read_file`, `write_file`, `list_files`, `copy_file`, `move_file`, `send_file`). `delete_file` is destructive and may be disabled unless explicitly enabled.')
+  }
   if (enabledTools.includes('edit_file')) lines.push('- Precise single-match replacement is available (`edit_file`).')
   if (enabledTools.includes('web_search')) lines.push('- Web search is available (`web_search`). Use it for external research, options discovery, and validation.')
   if (enabledTools.includes('web_fetch')) lines.push('- URL content extraction is available (`web_fetch`) for source-backed analysis.')
   if (enabledTools.includes('browser')) lines.push('- Browser automation is available (`browser`). Use it for interactive websites and screenshots.')
-  if (enabledTools.includes('claude_code')) lines.push('- Claude Code delegation is available (`delegate_to_claude_code`) for deep coding/refactor tasks.')
+  if (enabledTools.includes('claude_code')) lines.push('- CLI delegation is available (`delegate_to_claude_code`, `delegate_to_codex_cli`, `delegate_to_opencode_cli`) for deep coding/refactor tasks. Resume IDs may be returned via `[delegate_meta]`.')
   if (enabledTools.includes('memory')) lines.push('- Long-term memory is available (`memory_tool`) to store and recall durable context.')
   if (enabledTools.includes('manage_agents')) lines.push('- Agent management is available (`manage_agents`) to create or adjust specialist agents.')
   if (enabledTools.includes('manage_tasks')) lines.push('- Task management is available (`manage_tasks`) to create and track execution plans.')
   if (enabledTools.includes('manage_schedules')) lines.push('- Schedule management is available (`manage_schedules`) for recurring/ongoing runs.')
+  if (enabledTools.includes('manage_documents')) lines.push('- Document indexing/search is available (`manage_documents`) for long-term knowledge and retrieval.')
+  if (enabledTools.includes('manage_webhooks')) lines.push('- Webhook registration is available (`manage_webhooks`) so external events can trigger agent work.')
   if (enabledTools.includes('manage_skills')) lines.push('- Skill management is available (`manage_skills`) to add reusable capabilities.')
-  if (enabledTools.includes('manage_connectors')) lines.push('- Connector management is available (`manage_connectors`) for channels like WhatsApp/Telegram/Slack.')
-  if (enabledTools.includes('manage_sessions')) lines.push('- Session management is available (`manage_sessions` + `sessions_tool`) for session discovery, delegation, and inter-session messaging.')
+  if (enabledTools.includes('manage_connectors')) lines.push('- Connector management is available (`manage_connectors`) for channels like WhatsApp/Telegram/Slack, plus proactive outbound notifications via `connector_message_tool`.')
+  if (enabledTools.includes('manage_sessions')) lines.push('- Session management is available (`manage_sessions`, `sessions_tool`, `whoami_tool`, `search_history_tool`) for session identity, history lookup, delegation, and inter-session messaging.')
   if (enabledTools.includes('manage_secrets')) lines.push('- Secret management is available (`manage_secrets`) for durable encrypted credentials and API tokens.')
   return lines
 }
@@ -61,6 +65,7 @@ function buildAgenticExecutionPolicy(opts: {
     'For multi-step work, keep the user informed with short progress updates tied to real actions (what you are doing now, what finished, and what is next).',
     'If you state an intention to do research/build/execute, immediately follow through with tool calls in the same run.',
     'Never claim completed research/build results without tool evidence. If a tool fails or returns empty results, say that clearly and retry with another approach.',
+    'If the user names a tool explicitly (for example "call connector_message_tool"), you must actually invoke that tool instead of simulating or paraphrasing its result.',
     'Before finalizing: verify key claims with concrete outputs from tools whenever tools are available.',
     opts.loopMode === 'ongoing'
       ? 'Loop mode is ONGOING: prefer continued execution and progress tracking over one-shot replies; keep iterating until done, blocked, or safety/runtime limits are reached.'
@@ -73,6 +78,12 @@ function buildAgenticExecutionPolicy(opts: {
       : '',
     opts.enabledTools.includes('manage_agents')
       ? 'If a specialist would improve output, create or configure a focused agent and assign work accordingly.'
+      : '',
+    opts.enabledTools.includes('manage_documents')
+      ? 'For substantial context, store source documents and retrieve them with manage_documents search/get instead of relying on short memory snippets alone.'
+      : '',
+    opts.enabledTools.includes('manage_webhooks')
+      ? 'For event-driven workflows, register webhooks and let external triggers enqueue follow-up work automatically.'
       : '',
     opts.enabledTools.includes('manage_connectors')
       ? 'If the user wants proactive outreach (e.g., WhatsApp updates), configure connectors and pair with schedules/tasks to deliver status updates.'

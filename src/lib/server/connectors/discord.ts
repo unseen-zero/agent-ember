@@ -1,6 +1,7 @@
 import { Client, GatewayIntentBits, Events, Partials } from 'discord.js'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
+import { inferInboundMediaType } from './media'
 
 const discord: PlatformConnector = {
   async start(connector, botToken, onMessage): Promise<ConnectorInstance> {
@@ -27,14 +28,25 @@ const discord: PlatformConnector = {
       // Filter by allowed channels if configured
       if (allowedChannels && !allowedChannels.includes(message.channelId)) return
 
+      const attachmentList = Array.from(message.attachments.values())
+      const media = attachmentList.map((a) => ({
+        type: inferInboundMediaType(a.contentType || undefined, a.name || undefined),
+        fileName: a.name || undefined,
+        mimeType: a.contentType || undefined,
+        sizeBytes: a.size || undefined,
+        url: a.url || undefined,
+      }))
+      const firstImage = media.find((m) => m.type === 'image' && m.url)
+
       const inbound: InboundMessage = {
         platform: 'discord',
         channelId: message.channelId,
         channelName: 'name' in message.channel ? (message.channel as any).name : 'DM',
         senderId: message.author.id,
         senderName: message.author.displayName || message.author.username,
-        text: message.content,
-        imageUrl: message.attachments.first()?.url,
+        text: message.content || (media.length > 0 ? '(media message)' : ''),
+        imageUrl: firstImage?.url,
+        media,
       }
 
       try {

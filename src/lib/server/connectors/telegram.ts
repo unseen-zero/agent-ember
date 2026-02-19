@@ -1,6 +1,7 @@
 import { Bot } from 'grammy'
 import type { Connector } from '@/types'
-import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
+import type { PlatformConnector, ConnectorInstance, InboundMessage, InboundMediaType } from './types'
+import { downloadInboundMediaToUpload, inferInboundMediaType } from './media'
 
 const telegram: PlatformConnector = {
   async start(connector, botToken, onMessage): Promise<ConnectorInstance> {
@@ -33,14 +34,88 @@ const telegram: PlatformConnector = {
       await ctx.reply('Hello! I\'m ready to chat. Send me a message.')
     })
 
-    bot.on('message:text', async (ctx) => {
+    bot.on('message', async (ctx) => {
+      if (!ctx.message || !ctx.from || !ctx.chat) return
       const chatId = String(ctx.chat.id)
-      console.log(`[telegram] Message from ${ctx.from.first_name} (chat=${chatId}): ${ctx.message.text.slice(0, 80)}`)
+      const raw = ctx.message as any
+      const text = raw.text || raw.caption || ''
+      console.log(`[telegram] Message from ${ctx.from.first_name} (chat=${chatId}): ${String(text).slice(0, 80)}`)
 
       // Filter by allowed chats if configured
       if (allowedChats && !allowedChats.includes(chatId)) {
         console.log(`[telegram] Skipping — chat ${chatId} not in allowed list: ${allowedChats.join(',')}`)
         return
+      }
+
+      const media: NonNullable<InboundMessage['media']> = []
+      const mediaCandidates: Array<{ fileId: string; mimeType?: string; fileName?: string; type: InboundMediaType }> = []
+
+      if (Array.isArray(raw.photo) && raw.photo.length > 0) {
+        const largest = raw.photo[raw.photo.length - 1]
+        if (largest?.file_id) mediaCandidates.push({ fileId: largest.file_id, type: 'image' })
+      }
+      if (raw.video?.file_id) {
+        mediaCandidates.push({
+          fileId: raw.video.file_id,
+          type: 'video',
+          mimeType: raw.video.mime_type || undefined,
+          fileName: raw.video.file_name || undefined,
+        })
+      }
+      if (raw.audio?.file_id) {
+        mediaCandidates.push({
+          fileId: raw.audio.file_id,
+          type: 'audio',
+          mimeType: raw.audio.mime_type || undefined,
+          fileName: raw.audio.file_name || undefined,
+        })
+      }
+      if (raw.voice?.file_id) {
+        mediaCandidates.push({
+          fileId: raw.voice.file_id,
+          type: 'audio',
+          mimeType: raw.voice.mime_type || 'audio/ogg',
+          fileName: 'voice.ogg',
+        })
+      }
+      if (raw.document?.file_id) {
+        mediaCandidates.push({
+          fileId: raw.document.file_id,
+          type: inferInboundMediaType(raw.document.mime_type || undefined, raw.document.file_name || undefined, 'document'),
+          mimeType: raw.document.mime_type || undefined,
+          fileName: raw.document.file_name || undefined,
+        })
+      }
+      if (raw.animation?.file_id) {
+        mediaCandidates.push({
+          fileId: raw.animation.file_id,
+          type: 'video',
+          mimeType: raw.animation.mime_type || undefined,
+          fileName: raw.animation.file_name || undefined,
+        })
+      }
+
+      for (const m of mediaCandidates) {
+        try {
+          const file = await bot.api.getFile(m.fileId)
+          if (!file?.file_path) throw new Error('Missing Telegram file_path')
+          const sourceUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`
+          const stored = await downloadInboundMediaToUpload({
+            connectorId: connector.id,
+            mediaType: m.type,
+            url: sourceUrl,
+            fileName: m.fileName,
+            mimeType: m.mimeType,
+          })
+          if (stored) media.push(stored)
+        } catch (err: any) {
+          console.warn(`[telegram] Failed to fetch media ${m.fileId}:`, err?.message || String(err))
+          media.push({
+            type: m.type,
+            fileName: m.fileName,
+            mimeType: m.mimeType,
+          })
+        }
       }
 
       const inbound: InboundMessage = {
@@ -51,7 +126,9 @@ const telegram: PlatformConnector = {
           : ('title' in ctx.chat ? ctx.chat.title : chatId),
         senderId: String(ctx.from.id),
         senderName: ctx.from.first_name + (ctx.from.last_name ? ` ${ctx.from.last_name}` : ''),
-        text: ctx.message.text,
+        text: text || (media.length > 0 ? '(media message)' : ''),
+        imageUrl: media.find((m) => m.type === 'image')?.url,
+        media,
       }
 
       try {

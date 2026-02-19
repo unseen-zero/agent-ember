@@ -48,6 +48,11 @@ export interface Session {
   apiEndpoint?: string | null
   claudeSessionId: string | null
   codexThreadId?: string | null
+  delegateResumeIds?: {
+    claudeCode?: string | null
+    codex?: string | null
+    opencode?: string | null
+  }
   messages: Message[]
   createdAt: number
   lastActiveAt: number

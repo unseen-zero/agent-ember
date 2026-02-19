@@ -10,7 +10,10 @@ import type { ProviderType, ClaudeSkill } from '@/types'
 
 const AVAILABLE_TOOLS: { id: string; label: string; description: string }[] = [
   { id: 'shell', label: 'Shell', description: 'Execute commands in the working directory' },
-  { id: 'files', label: 'Files', description: 'Read, write, and list files' },
+  { id: 'files', label: 'Files', description: 'Read, write, list, move, copy, and send files' },
+  { id: 'copy_file', label: 'Copy File', description: 'Copy files within the working directory' },
+  { id: 'move_file', label: 'Move File', description: 'Move/rename files within the working directory' },
+  { id: 'delete_file', label: 'Delete File', description: 'Delete files/directories (disabled by default)' },
   { id: 'edit_file', label: 'Edit File', description: 'Search-and-replace editing within files' },
   { id: 'process', label: 'Process', description: 'Monitor and control long-running shell commands' },
   { id: 'web_search', label: 'Web Search', description: 'Search the web via DuckDuckGo' },
@@ -25,6 +28,8 @@ const PLATFORM_TOOLS: { id: string; label: string; description: string }[] = [
   { id: 'manage_tasks', label: 'Tasks', description: 'Create, edit, and delete tasks' },
   { id: 'manage_schedules', label: 'Schedules', description: 'Create, edit, and delete schedules' },
   { id: 'manage_skills', label: 'Skills', description: 'Create, edit, and delete skills' },
+  { id: 'manage_documents', label: 'Documents', description: 'Upload, search, and delete indexed documents' },
+  { id: 'manage_webhooks', label: 'Webhooks', description: 'Register webhooks that trigger agent sessions' },
   { id: 'manage_connectors', label: 'Connectors', description: 'Create, edit, and delete connectors' },
   { id: 'manage_sessions', label: 'Sessions', description: 'List sessions, send messages, and spawn session work' },
   { id: 'manage_secrets', label: 'Secrets', description: 'Store and retrieve encrypted service secrets' },

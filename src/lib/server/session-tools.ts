@@ -24,6 +24,8 @@ import {
   loadSchedules, saveSchedules,
   loadSkills, saveSkills,
   loadConnectors, saveConnectors,
+  loadDocuments, saveDocuments,
+  loadWebhooks, saveWebhooks,
   loadSecrets, saveSecrets,
   loadSessions, saveSessions,
   UPLOAD_DIR,
@@ -51,6 +53,37 @@ function truncate(text: string, max: number): string {
 function tail(text: string, max = 4000): string {
   if (!text) return ''
   return text.length <= max ? text : text.slice(text.length - max)
+}
+
+function extractResumeIdentifier(text: string): string | null {
+  if (!text) return null
+  const patterns = [
+    /session[_\s-]?id["'\s]*[:=]\s*["']?([A-Za-z0-9._:-]{6,})/i,
+    /thread[_\s-]?id["'\s]*[:=]\s*["']?([A-Za-z0-9._:-]{6,})/i,
+    /resume(?:\s+with)?\s+([A-Za-z0-9._:-]{6,})/i,
+  ]
+  for (const pattern of patterns) {
+    const m = text.match(pattern)
+    if (m?.[1]) return m[1]
+  }
+  return null
+}
+
+const binaryLookupCache = new Map<string, { checkedAt: number; path: string | null }>()
+const BINARY_LOOKUP_TTL_MS = 30_000
+
+function findBinaryOnPath(binaryName: string): string | null {
+  const now = Date.now()
+  const cached = binaryLookupCache.get(binaryName)
+  if (cached && now - cached.checkedAt < BINARY_LOOKUP_TTL_MS) return cached.path
+
+  const probe = spawnSync('/bin/zsh', ['-lc', `command -v ${binaryName} 2>/dev/null`], {
+    encoding: 'utf-8',
+    timeout: 2000,
+  })
+  const resolved = (probe.stdout || '').trim() || null
+  binaryLookupCache.set(binaryName, { checkedAt: now, path: resolved })
+  return resolved
 }
 
 function coerceEnvMap(value: unknown): Record<string, string> | undefined {
@@ -100,6 +133,64 @@ function listDirRecursive(dir: string, depth: number, maxDepth: number): string[
     // permission error etc
   }
   return entries
+}
+
+const MAX_DOCUMENT_TEXT_CHARS = 500_000
+
+function extractDocumentText(filePath: string): { text: string; method: string } {
+  const ext = path.extname(filePath).toLowerCase()
+
+  const readUtf8Text = (): string => {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    const cleaned = raw.replace(/\u0000/g, '')
+    return cleaned
+  }
+
+  if (ext === '.pdf') {
+    const pdftotextBinary = findBinaryOnPath('pdftotext')
+    if (!pdftotextBinary) throw new Error('pdftotext is not installed. Install poppler to index PDF files.')
+    const out = spawnSync(pdftotextBinary, ['-layout', '-nopgbrk', '-q', filePath, '-'], {
+      encoding: 'utf-8',
+      maxBuffer: 25 * 1024 * 1024,
+      timeout: 20_000,
+    })
+    if ((out.status ?? 1) !== 0) {
+      throw new Error(`pdftotext failed: ${(out.stderr || out.stdout || '').trim() || 'unknown error'}`)
+    }
+    return { text: out.stdout || '', method: 'pdftotext' }
+  }
+
+  if (['.txt', '.md', '.markdown', '.json', '.csv', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.java', '.yaml', '.yml'].includes(ext)) {
+    return { text: readUtf8Text(), method: 'utf8' }
+  }
+
+  if (ext === '.html' || ext === '.htm') {
+    const html = fs.readFileSync(filePath, 'utf-8')
+    const $ = cheerio.load(html)
+    const text = $('body').text() || $.text()
+    return { text, method: 'html-strip' }
+  }
+
+  if (['.doc', '.docx', '.rtf'].includes(ext)) {
+    const out = spawnSync('/usr/bin/textutil', ['-convert', 'txt', '-stdout', filePath], {
+      encoding: 'utf-8',
+      maxBuffer: 25 * 1024 * 1024,
+      timeout: 20_000,
+    })
+    if ((out.status ?? 1) === 0 && out.stdout?.trim()) {
+      return { text: out.stdout, method: 'textutil' }
+    }
+  }
+
+  const fallback = readUtf8Text()
+  if (fallback.trim()) return { text: fallback, method: 'utf8-fallback' }
+  throw new Error(`Unsupported document type: ${ext || '(no extension)'}`)
+}
+
+function trimDocumentContent(text: string): string {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\u0000/g, '').trim()
+  if (normalized.length <= MAX_DOCUMENT_TEXT_CHARS) return normalized
+  return normalized.slice(0, MAX_DOCUMENT_TEXT_CHARS)
 }
 
 interface ToolContext {
@@ -157,6 +248,38 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
   const runtime = loadRuntimeSettings()
   const commandTimeoutMs = runtime.shellCommandTimeoutMs
   const claudeTimeoutMs = runtime.claudeCodeTimeoutMs
+  const cliProcessTimeoutMs = runtime.cliProcessTimeoutMs
+
+  const resolveCurrentSession = (): any | null => {
+    if (!ctx?.sessionId) return null
+    const sessions = loadSessions()
+    return sessions[ctx.sessionId] || null
+  }
+
+  const readStoredDelegateResumeId = (key: 'claudeCode' | 'codex' | 'opencode'): string | null => {
+    const session = resolveCurrentSession()
+    if (!session?.delegateResumeIds || typeof session.delegateResumeIds !== 'object') return null
+    const raw = session.delegateResumeIds[key]
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+  }
+
+  const persistDelegateResumeId = (key: 'claudeCode' | 'codex' | 'opencode', resumeId: string | null | undefined): void => {
+    const normalized = typeof resumeId === 'string' ? resumeId.trim() : ''
+    if (!normalized || !ctx?.sessionId) return
+    const sessions = loadSessions()
+    const target = sessions[ctx.sessionId]
+    if (!target) return
+    const current = (target.delegateResumeIds && typeof target.delegateResumeIds === 'object')
+      ? target.delegateResumeIds
+      : {}
+    target.delegateResumeIds = {
+      ...current,
+      [key]: normalized,
+    }
+    target.updatedAt = Date.now()
+    sessions[ctx.sessionId] = target
+    saveSessions(sessions)
+  }
 
   if (enabledTools.includes('shell')) {
     tools.push(
@@ -302,7 +425,17 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     )
   }
 
-  if (enabledTools.includes('files')) {
+  const filesEnabled = enabledTools.includes('files')
+  const canReadFiles = filesEnabled || enabledTools.includes('read_file')
+  const canWriteFiles = filesEnabled || enabledTools.includes('write_file')
+  const canListFiles = filesEnabled || enabledTools.includes('list_files')
+  const canSendFiles = filesEnabled || enabledTools.includes('send_file')
+  const canCopyFiles = filesEnabled || enabledTools.includes('copy_file')
+  const canMoveFiles = filesEnabled || enabledTools.includes('move_file')
+  // Destructive by default: only enabled when explicitly toggled.
+  const canDeleteFiles = enabledTools.includes('delete_file')
+
+  if (canReadFiles) {
     tools.push(
       tool(
         async ({ filePath }) => {
@@ -323,7 +456,9 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
         },
       ),
     )
+  }
 
+  if (canWriteFiles) {
     tools.push(
       tool(
         async ({ filePath, content }) => {
@@ -346,7 +481,9 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
         },
       ),
     )
+  }
 
+  if (canListFiles) {
     tools.push(
       tool(
         async ({ dirPath }) => {
@@ -369,8 +506,104 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     )
   }
 
-  // send_file is always available when files tool is enabled — lets agents share any file with the user
-  if (enabledTools.includes('files')) {
+  if (canCopyFiles) {
+    tools.push(
+      tool(
+        async ({ sourcePath, destinationPath, overwrite }) => {
+          try {
+            const source = safePath(cwd, sourcePath)
+            const destination = safePath(cwd, destinationPath)
+            if (!fs.existsSync(source)) return `Error: source file not found: ${sourcePath}`
+            const sourceStat = fs.statSync(source)
+            if (sourceStat.isDirectory()) return `Error: source must be a file (directories are not supported by copy_file).`
+            if (fs.existsSync(destination) && !overwrite) return `Error: destination already exists: ${destinationPath} (set overwrite=true to replace).`
+            fs.mkdirSync(path.dirname(destination), { recursive: true })
+            fs.copyFileSync(source, destination)
+            return `File copied: ${sourcePath} -> ${destinationPath}`
+          } catch (err: any) {
+            return `Error copying file: ${err.message}`
+          }
+        },
+        {
+          name: 'copy_file',
+          description: 'Copy a file to a new location in the working directory.',
+          schema: z.object({
+            sourcePath: z.string().describe('Source file path (relative to working directory)'),
+            destinationPath: z.string().describe('Destination file path (relative to working directory)'),
+            overwrite: z.boolean().optional().describe('Overwrite destination if it exists (default false)'),
+          }),
+        },
+      ),
+    )
+  }
+
+  if (canMoveFiles) {
+    tools.push(
+      tool(
+        async ({ sourcePath, destinationPath, overwrite }) => {
+          try {
+            const source = safePath(cwd, sourcePath)
+            const destination = safePath(cwd, destinationPath)
+            if (!fs.existsSync(source)) return `Error: source file not found: ${sourcePath}`
+            const sourceStat = fs.statSync(source)
+            if (sourceStat.isDirectory()) return `Error: source must be a file (directories are not supported by move_file).`
+            if (fs.existsSync(destination) && !overwrite) return `Error: destination already exists: ${destinationPath} (set overwrite=true to replace).`
+            fs.mkdirSync(path.dirname(destination), { recursive: true })
+            if (fs.existsSync(destination) && overwrite) fs.unlinkSync(destination)
+            fs.renameSync(source, destination)
+            return `File moved: ${sourcePath} -> ${destinationPath}`
+          } catch (err: any) {
+            return `Error moving file: ${err.message}`
+          }
+        },
+        {
+          name: 'move_file',
+          description: 'Move (rename) a file to a new location in the working directory.',
+          schema: z.object({
+            sourcePath: z.string().describe('Source file path (relative to working directory)'),
+            destinationPath: z.string().describe('Destination file path (relative to working directory)'),
+            overwrite: z.boolean().optional().describe('Overwrite destination if it exists (default false)'),
+          }),
+        },
+      ),
+    )
+  }
+
+  if (canDeleteFiles) {
+    tools.push(
+      tool(
+        async ({ filePath, recursive, force }) => {
+          try {
+            const resolved = safePath(cwd, filePath)
+            const root = path.resolve(cwd)
+            if (resolved === root) return 'Error: refusing to delete the session working directory root.'
+            if (!fs.existsSync(resolved)) {
+              return force ? `Path already absent: ${filePath}` : `Error: path not found: ${filePath}`
+            }
+            const stat = fs.statSync(resolved)
+            if (stat.isDirectory() && !recursive) {
+              return 'Error: target is a directory. Set recursive=true to delete directories.'
+            }
+            fs.rmSync(resolved, { recursive: !!recursive, force: !!force })
+            return `Deleted: ${filePath}`
+          } catch (err: any) {
+            return `Error deleting file: ${err.message}`
+          }
+        },
+        {
+          name: 'delete_file',
+          description: 'Delete a file or directory from the working directory. Disabled by default and must be explicitly enabled.',
+          schema: z.object({
+            filePath: z.string().describe('Path to delete (relative to working directory)'),
+            recursive: z.boolean().optional().describe('Required for deleting directories'),
+            force: z.boolean().optional().describe('Ignore missing paths and force deletion where possible'),
+          }),
+        },
+      ),
+    )
+  }
+
+  if (canSendFiles) {
     tools.push(
       tool(
         async ({ filePath: rawPath }) => {
@@ -414,9 +647,21 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
   }
 
   if (enabledTools.includes('claude_code')) {
+    const claudeBinary = findBinaryOnPath('claude')
+    const codexBinary = findBinaryOnPath('codex')
+    const opencodeBinary = findBinaryOnPath('opencode')
+
+    if (!claudeBinary && !codexBinary && !opencodeBinary) {
+      log.warn('session-tools', 'Delegation tool enabled but no CLI binaries found', {
+        sessionId: ctx?.sessionId || null,
+        agentId: ctx?.agentId || null,
+      })
+    }
+
+    if (claudeBinary) {
     tools.push(
       tool(
-        async ({ task }) => {
+        async ({ task, resume, resumeId }) => {
           try {
             const env: NodeJS.ProcessEnv = { ...process.env }
             // Running inside Claude environments can block nested `claude` launches.
@@ -430,7 +675,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             }
 
             // Fast preflight: when Claude isn't authenticated, surface a clear error immediately.
-            const authProbe = spawnSync('claude', ['auth', 'status'], {
+            const authProbe = spawnSync(claudeBinary, ['auth', 'status'], {
               cwd,
               env,
               encoding: 'utf-8',
@@ -449,24 +694,35 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               }
             }
 
+            const storedResumeId = readStoredDelegateResumeId('claudeCode')
+            const resumeIdToUse = typeof resumeId === 'string' && resumeId.trim()
+              ? resumeId.trim()
+              : (resume ? storedResumeId : null)
+
             log.info('session-tools', 'delegate_to_claude_code start', {
               sessionId: ctx?.sessionId || null,
               agentId: ctx?.agentId || null,
               cwd,
               timeoutMs: claudeTimeoutMs,
               removedClaudeEnvKeys,
+              resumeRequested: !!resume || !!resumeId,
+              resumeId: resumeIdToUse || null,
               taskPreview: (task || '').slice(0, 200),
             })
 
             return new Promise<string>((resolve) => {
-              const args = ['--print', '--output-format', 'text', '--dangerously-skip-permissions']
-              const child = spawn('claude', args, {
+              const args = ['--print', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions']
+              if (resumeIdToUse) args.push('--resume', resumeIdToUse)
+              const child = spawn(claudeBinary, args, {
                 cwd,
                 env,
                 stdio: ['pipe', 'pipe', 'pipe'],
               })
               let stdout = ''
               let stderr = ''
+              let stdoutBuf = ''
+              let assistantText = ''
+              let discoveredSessionId: string | null = null
               let settled = false
               let timedOut = false
               const startedAt = Date.now()
@@ -491,8 +747,34 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 args,
               })
               child.stdout?.on('data', (chunk: Buffer) => {
-                stdout += chunk.toString()
+                const text = chunk.toString()
+                stdout += text
                 if (stdout.length > MAX_OUTPUT * 8) stdout = tail(stdout, MAX_OUTPUT * 8)
+                stdoutBuf += text
+                const lines = stdoutBuf.split('\n')
+                stdoutBuf = lines.pop() || ''
+                for (const line of lines) {
+                  if (!line.trim()) continue
+                  try {
+                    const ev = JSON.parse(line)
+                    if (typeof ev?.session_id === 'string' && ev.session_id.trim()) {
+                      discoveredSessionId = ev.session_id.trim()
+                    }
+                    if (ev?.type === 'result' && typeof ev?.result === 'string') {
+                      assistantText = ev.result
+                    } else if (ev?.type === 'assistant' && Array.isArray(ev?.message?.content)) {
+                      const textBlocks = ev.message.content
+                        .filter((block: any) => block?.type === 'text' && typeof block?.text === 'string')
+                        .map((block: any) => block.text)
+                        .join('')
+                      if (textBlocks) assistantText = textBlocks
+                    } else if (ev?.type === 'content_block_delta' && typeof ev?.delta?.text === 'string') {
+                      assistantText += ev.delta.text
+                    }
+                  } catch {
+                    // keep raw stdout fallback when parsing fails
+                  }
+                }
               })
               child.stderr?.on('data', (chunk: Buffer) => {
                 stderr += chunk.toString()
@@ -509,6 +791,11 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               child.on('close', (code, signal) => {
                 clearTimeout(timeoutHandle)
                 const durationMs = Date.now() - startedAt
+                if (!discoveredSessionId) {
+                  const guessed = extractResumeIdentifier(`${stdout}\n${stderr}`)
+                  if (guessed) discoveredSessionId = guessed
+                }
+                if (discoveredSessionId) persistDelegateResumeId('claudeCode', discoveredSessionId)
                 log.info('session-tools', 'delegate_to_claude_code child close', {
                   sessionId: ctx?.sessionId || null,
                   code,
@@ -517,6 +804,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                   durationMs,
                   stdoutLen: stdout.length,
                   stderrLen: stderr.length,
+                  discoveredSessionId,
                   stderrPreview: tail(stderr, 240),
                 })
                 if (timedOut) {
@@ -530,8 +818,12 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                   return
                 }
 
-                if (code === 0 && (stdout.trim() || stderr.trim())) {
-                  finish(stdout.trim() || stderr.trim())
+                const successText = assistantText.trim() || stdout.trim() || stderr.trim()
+                if (code === 0 && successText) {
+                  const out = discoveredSessionId
+                    ? `${successText}\n\n[delegate_meta]\nresume_id=${discoveredSessionId}`
+                    : successText
+                  finish(out)
                   return
                 }
 
@@ -560,10 +852,421 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
           description: 'Delegate a complex task to Claude Code CLI. Use for tasks that need deep code understanding, multi-file refactoring, or running tests. The task runs in the session working directory.',
           schema: z.object({
             task: z.string().describe('Detailed description of the task for Claude Code'),
+            resume: z.boolean().optional().describe('If true, try to resume the last saved Claude delegation session for this SwarmClaw session'),
+            resumeId: z.string().optional().describe('Explicit Claude session id to resume (overrides resume=true memory)'),
           }),
         },
       ),
     )
+    }
+
+    if (codexBinary) {
+    tools.push(
+      tool(
+        async ({ task, resume, resumeId }) => {
+          try {
+            const env: NodeJS.ProcessEnv = { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
+            const removedCodexEnvKeys: string[] = []
+            for (const key of Object.keys(env)) {
+              if (key.toUpperCase().startsWith('CODEX')) {
+                removedCodexEnvKeys.push(key)
+                delete env[key]
+              }
+            }
+
+            const hasApiKey = typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim().length > 0
+            if (!hasApiKey) {
+              const loginProbe = spawnSync(codexBinary, ['login', 'status'], {
+                cwd,
+                env,
+                encoding: 'utf-8',
+                timeout: 8000,
+              })
+              const probeText = `${loginProbe.stdout || ''}\n${loginProbe.stderr || ''}`.toLowerCase()
+              const loggedIn = probeText.includes('logged in')
+              if ((loginProbe.status ?? 1) !== 0 || !loggedIn) {
+                return 'Error: Codex CLI is not authenticated. Run `codex login` (or set OPENAI_API_KEY), then retry.'
+              }
+            }
+
+            const storedResumeId = readStoredDelegateResumeId('codex')
+            const resumeIdToUse = typeof resumeId === 'string' && resumeId.trim()
+              ? resumeId.trim()
+              : (resume ? storedResumeId : null)
+
+            log.info('session-tools', 'delegate_to_codex_cli start', {
+              sessionId: ctx?.sessionId || null,
+              agentId: ctx?.agentId || null,
+              cwd,
+              timeoutMs: cliProcessTimeoutMs,
+              removedCodexEnvKeys,
+              resumeRequested: !!resume || !!resumeId,
+              resumeId: resumeIdToUse || null,
+              taskPreview: (task || '').slice(0, 200),
+            })
+
+            return new Promise<string>((resolve) => {
+              const args = ['exec']
+              if (resumeIdToUse) args.push('resume', resumeIdToUse)
+              args.push('--json', '--full-auto', '--skip-git-repo-check', '-')
+              const child = spawn(codexBinary, args, {
+                cwd,
+                env,
+                stdio: ['pipe', 'pipe', 'pipe'],
+              })
+              let stdout = ''
+              let stderr = ''
+              let settled = false
+              let timedOut = false
+              const startedAt = Date.now()
+              let agentText = ''
+              let discoveredThreadId: string | null = null
+              const eventErrors: string[] = []
+              let stdoutBuf = ''
+
+              const finish = (result: string) => {
+                if (settled) return
+                settled = true
+                resolve(truncate(result, MAX_OUTPUT))
+              }
+
+              const timeoutHandle = setTimeout(() => {
+                timedOut = true
+                try { child.kill('SIGTERM') } catch { /* ignore */ }
+                setTimeout(() => {
+                  try { child.kill('SIGKILL') } catch { /* ignore */ }
+                }, 5000)
+              }, cliProcessTimeoutMs)
+
+              log.info('session-tools', 'delegate_to_codex_cli spawned', {
+                sessionId: ctx?.sessionId || null,
+                pid: child.pid || null,
+                args,
+              })
+
+              child.stdout?.on('data', (chunk: Buffer) => {
+                const text = chunk.toString()
+                stdout += text
+                if (stdout.length > MAX_OUTPUT * 8) stdout = tail(stdout, MAX_OUTPUT * 8)
+
+                stdoutBuf += text
+                const lines = stdoutBuf.split('\n')
+                stdoutBuf = lines.pop() || ''
+                for (const line of lines) {
+                  if (!line.trim()) continue
+                  try {
+                    const ev = JSON.parse(line)
+                    if (typeof ev?.thread_id === 'string' && ev.thread_id.trim()) {
+                      discoveredThreadId = ev.thread_id.trim()
+                    }
+                    if (ev.type === 'item.completed' && ev.item?.type === 'agent_message' && typeof ev.item?.text === 'string') {
+                      agentText = ev.item.text
+                    } else if (ev.type === 'item.completed' && ev.item?.type === 'message' && ev.item?.role === 'assistant') {
+                      const content = ev.item.content
+                      if (Array.isArray(content)) {
+                        const txt = content
+                          .filter((c: any) => c?.type === 'output_text' && typeof c?.text === 'string')
+                          .map((c: any) => c.text)
+                          .join('')
+                        if (txt) agentText = txt
+                      } else if (typeof content === 'string') {
+                        agentText = content
+                      }
+                    } else if (ev.type === 'error' && ev.message) {
+                      eventErrors.push(String(ev.message))
+                    } else if (ev.type === 'turn.failed' && ev.error?.message) {
+                      eventErrors.push(String(ev.error.message))
+                    }
+                  } catch {
+                    // Ignore non-JSON lines in parser path; raw stdout still captured above.
+                  }
+                }
+              })
+              child.stderr?.on('data', (chunk: Buffer) => {
+                stderr += chunk.toString()
+                if (stderr.length > MAX_OUTPUT * 8) stderr = tail(stderr, MAX_OUTPUT * 8)
+              })
+              child.on('error', (err) => {
+                clearTimeout(timeoutHandle)
+                log.error('session-tools', 'delegate_to_codex_cli child error', {
+                  sessionId: ctx?.sessionId || null,
+                  error: err?.message || String(err),
+                })
+                finish(`Error: failed to start Codex CLI: ${err?.message || String(err)}`)
+              })
+              child.on('close', (code, signal) => {
+                clearTimeout(timeoutHandle)
+                const durationMs = Date.now() - startedAt
+                if (!discoveredThreadId) {
+                  const guessed = extractResumeIdentifier(`${stdout}\n${stderr}`)
+                  if (guessed) discoveredThreadId = guessed
+                }
+                if (discoveredThreadId) persistDelegateResumeId('codex', discoveredThreadId)
+                log.info('session-tools', 'delegate_to_codex_cli child close', {
+                  sessionId: ctx?.sessionId || null,
+                  code,
+                  signal: signal || null,
+                  timedOut,
+                  durationMs,
+                  stdoutLen: stdout.length,
+                  stderrLen: stderr.length,
+                  eventErrorCount: eventErrors.length,
+                  discoveredThreadId,
+                  stderrPreview: tail(stderr, 240),
+                })
+                if (timedOut) {
+                  const msg = [
+                    `Error: Codex CLI timed out after ${Math.round(cliProcessTimeoutMs / 1000)}s.`,
+                    stderr.trim() ? `stderr:\n${tail(stderr, 1500)}` : '',
+                    eventErrors.length ? `event errors:\n${tail(eventErrors.join('\n'), 1200)}` : '',
+                    'Try increasing "CLI Process Timeout (sec)" in Settings.',
+                  ].filter(Boolean).join('\n\n')
+                  finish(msg)
+                  return
+                }
+                if (code === 0 && agentText.trim()) {
+                  const out = discoveredThreadId
+                    ? `${agentText.trim()}\n\n[delegate_meta]\nresume_id=${discoveredThreadId}`
+                    : agentText.trim()
+                  finish(out)
+                  return
+                }
+                if (code === 0 && stdout.trim() && !eventErrors.length) {
+                  const out = discoveredThreadId
+                    ? `${stdout.trim()}\n\n[delegate_meta]\nresume_id=${discoveredThreadId}`
+                    : stdout.trim()
+                  finish(out)
+                  return
+                }
+                const msg = [
+                  `Error: Codex CLI exited with code ${code ?? 'unknown'}${signal ? ` (signal ${signal})` : ''}.`,
+                  eventErrors.length ? `event errors:\n${tail(eventErrors.join('\n'), 1200)}` : '',
+                  stderr.trim() ? `stderr:\n${tail(stderr, 1500)}` : '',
+                  stdout.trim() ? `stdout:\n${tail(stdout, 1500)}` : '',
+                ].filter(Boolean).join('\n\n')
+                finish(msg || 'Error: Codex CLI returned no output.')
+              })
+
+              try {
+                child.stdin?.write(task)
+                child.stdin?.end()
+              } catch (err: any) {
+                clearTimeout(timeoutHandle)
+                finish(`Error: failed to send task to Codex CLI: ${err?.message || String(err)}`)
+              }
+            })
+          } catch (err: any) {
+            return `Error delegating to Codex CLI: ${err.message}`
+          }
+        },
+        {
+          name: 'delegate_to_codex_cli',
+          description: 'Delegate a complex task to Codex CLI. Use for deep coding/refactor tasks and shell-driven implementation work.',
+          schema: z.object({
+            task: z.string().describe('Detailed description of the task for Codex CLI'),
+            resume: z.boolean().optional().describe('If true, try to resume the last saved Codex delegation thread for this SwarmClaw session'),
+            resumeId: z.string().optional().describe('Explicit Codex thread id to resume (overrides resume=true memory)'),
+          }),
+        },
+      ),
+    )
+    }
+
+    if (opencodeBinary) {
+    tools.push(
+      tool(
+        async ({ task, resume, resumeId }) => {
+          try {
+            const env: NodeJS.ProcessEnv = { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
+            const removedOpenCodeEnvKeys: string[] = []
+            for (const key of Object.keys(env)) {
+              if (key.toUpperCase().startsWith('OPENCODE')) {
+                removedOpenCodeEnvKeys.push(key)
+                delete env[key]
+              }
+            }
+            const hasApiCredentialEnv = [
+              'OPENAI_API_KEY',
+              'ANTHROPIC_API_KEY',
+              'GROQ_API_KEY',
+              'GOOGLE_API_KEY',
+              'XAI_API_KEY',
+              'MISTRAL_API_KEY',
+              'DEEPSEEK_API_KEY',
+              'TOGETHER_API_KEY',
+            ].some((key) => typeof env[key] === 'string' && (env[key] || '').trim().length > 0)
+            if (!hasApiCredentialEnv) {
+              const authProbe = spawnSync(opencodeBinary, ['auth', 'list'], {
+                cwd,
+                env,
+                encoding: 'utf-8',
+                timeout: 8000,
+              })
+              const probeText = `${authProbe.stdout || ''}\n${authProbe.stderr || ''}`.toLowerCase()
+              const noCreds = probeText.includes('0 credentials')
+              if ((authProbe.status ?? 1) !== 0 || noCreds) {
+                return 'Error: OpenCode CLI is not authenticated. Run `opencode auth login` (or set provider API key env vars), then retry.'
+              }
+            }
+            const storedResumeId = readStoredDelegateResumeId('opencode')
+            const resumeIdToUse = typeof resumeId === 'string' && resumeId.trim()
+              ? resumeId.trim()
+              : (resume ? storedResumeId : null)
+
+            log.info('session-tools', 'delegate_to_opencode_cli start', {
+              sessionId: ctx?.sessionId || null,
+              agentId: ctx?.agentId || null,
+              cwd,
+              timeoutMs: cliProcessTimeoutMs,
+              removedOpenCodeEnvKeys,
+              resumeRequested: !!resume || !!resumeId,
+              resumeId: resumeIdToUse || null,
+              taskPreview: (task || '').slice(0, 200),
+            })
+
+            return new Promise<string>((resolve) => {
+              const args = ['run', task, '--format', 'json']
+              if (resumeIdToUse) args.push('--session', resumeIdToUse)
+              const child = spawn(opencodeBinary, args, {
+                cwd,
+                env,
+                stdio: ['pipe', 'pipe', 'pipe'],
+              })
+              let stdout = ''
+              let stderr = ''
+              let discoveredSessionId: string | null = null
+              let parsedText = ''
+              const eventErrors: string[] = []
+              let stdoutBuf = ''
+              let settled = false
+              let timedOut = false
+              const startedAt = Date.now()
+
+              const finish = (result: string) => {
+                if (settled) return
+                settled = true
+                resolve(truncate(result, MAX_OUTPUT))
+              }
+
+              const timeoutHandle = setTimeout(() => {
+                timedOut = true
+                try { child.kill('SIGTERM') } catch { /* ignore */ }
+                setTimeout(() => {
+                  try { child.kill('SIGKILL') } catch { /* ignore */ }
+                }, 5000)
+              }, cliProcessTimeoutMs)
+
+              log.info('session-tools', 'delegate_to_opencode_cli spawned', {
+                sessionId: ctx?.sessionId || null,
+                pid: child.pid || null,
+                args: resumeIdToUse
+                  ? ['run', '(task hidden)', '--format', 'json', '--session', resumeIdToUse]
+                  : ['run', '(task hidden)', '--format', 'json'],
+              })
+              child.stdout?.on('data', (chunk: Buffer) => {
+                const text = chunk.toString()
+                stdout += text
+                if (stdout.length > MAX_OUTPUT * 8) stdout = tail(stdout, MAX_OUTPUT * 8)
+                stdoutBuf += text
+                const lines = stdoutBuf.split('\n')
+                stdoutBuf = lines.pop() || ''
+                for (const line of lines) {
+                  if (!line.trim()) continue
+                  try {
+                    const ev = JSON.parse(line)
+                    if (typeof ev?.sessionID === 'string' && ev.sessionID.trim()) {
+                      discoveredSessionId = ev.sessionID.trim()
+                    }
+                    if (ev?.type === 'text' && typeof ev?.part?.text === 'string') {
+                      parsedText += ev.part.text
+                    } else if (ev?.type === 'error') {
+                      const msg = typeof ev?.error === 'string'
+                        ? ev.error
+                        : typeof ev?.message === 'string'
+                          ? ev.message
+                          : 'Unknown OpenCode event error'
+                      eventErrors.push(msg)
+                    }
+                  } catch {
+                    // keep raw stdout fallback
+                  }
+                }
+              })
+              child.stderr?.on('data', (chunk: Buffer) => {
+                stderr += chunk.toString()
+                if (stderr.length > MAX_OUTPUT * 8) stderr = tail(stderr, MAX_OUTPUT * 8)
+              })
+              child.on('error', (err) => {
+                clearTimeout(timeoutHandle)
+                log.error('session-tools', 'delegate_to_opencode_cli child error', {
+                  sessionId: ctx?.sessionId || null,
+                  error: err?.message || String(err),
+                })
+                finish(`Error: failed to start OpenCode CLI: ${err?.message || String(err)}`)
+              })
+              child.on('close', (code, signal) => {
+                clearTimeout(timeoutHandle)
+                const durationMs = Date.now() - startedAt
+                const guessed = extractResumeIdentifier(`${stdout}\n${stderr}`)
+                if (guessed) discoveredSessionId = guessed
+                if (discoveredSessionId) persistDelegateResumeId('opencode', discoveredSessionId)
+                log.info('session-tools', 'delegate_to_opencode_cli child close', {
+                  sessionId: ctx?.sessionId || null,
+                  code,
+                  signal: signal || null,
+                  timedOut,
+                  durationMs,
+                  stdoutLen: stdout.length,
+                  stderrLen: stderr.length,
+                  parsedTextLen: parsedText.length,
+                  eventErrorCount: eventErrors.length,
+                  discoveredSessionId,
+                  stderrPreview: tail(stderr, 240),
+                })
+                if (timedOut) {
+                  const msg = [
+                    `Error: OpenCode CLI timed out after ${Math.round(cliProcessTimeoutMs / 1000)}s.`,
+                    stderr.trim() ? `stderr:\n${tail(stderr, 1500)}` : '',
+                    eventErrors.length ? `event errors:\n${tail(eventErrors.join('\n'), 1200)}` : '',
+                    stdout.trim() ? `stdout:\n${tail(stdout, 1500)}` : '',
+                    'Try increasing "CLI Process Timeout (sec)" in Settings.',
+                  ].filter(Boolean).join('\n\n')
+                  finish(msg)
+                  return
+                }
+                const successText = parsedText.trim() || stdout.trim() || stderr.trim()
+                if (code === 0 && successText) {
+                  const out = discoveredSessionId
+                    ? `${successText}\n\n[delegate_meta]\nresume_id=${discoveredSessionId}`
+                    : successText
+                  finish(out)
+                  return
+                }
+                const msg = [
+                  `Error: OpenCode CLI exited with code ${code ?? 'unknown'}${signal ? ` (signal ${signal})` : ''}.`,
+                  eventErrors.length ? `event errors:\n${tail(eventErrors.join('\n'), 1200)}` : '',
+                  stderr.trim() ? `stderr:\n${tail(stderr, 1500)}` : '',
+                  stdout.trim() ? `stdout:\n${tail(stdout, 1500)}` : '',
+                ].filter(Boolean).join('\n\n')
+                finish(msg || 'Error: OpenCode CLI returned no output.')
+              })
+            })
+          } catch (err: any) {
+            return `Error delegating to OpenCode CLI: ${err.message}`
+          }
+        },
+        {
+          name: 'delegate_to_opencode_cli',
+          description: 'Delegate a complex task to OpenCode CLI. Use for deep coding/refactor tasks and shell-driven implementation work.',
+          schema: z.object({
+            task: z.string().describe('Detailed description of the task for OpenCode CLI'),
+            resume: z.boolean().optional().describe('If true, try to resume the last saved OpenCode delegation session for this SwarmClaw session'),
+            resumeId: z.string().optional().describe('Explicit OpenCode session id to resume (overrides resume=true memory)'),
+          }),
+        },
+      ),
+    )
+    }
   }
 
   if (enabledTools.includes('edit_file')) {
@@ -763,26 +1466,48 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
       return text.replace(/\n{3,}/g, '\n').trim()
     }
 
-    const callMcpTool = async (toolName: string, args: Record<string, any>): Promise<string> => {
+    const callMcpTool = async (
+      toolName: string,
+      args: Record<string, any>,
+      options?: { saveTo?: string },
+    ): Promise<string> => {
       await ensureMcp()
       const result = await mcpClient.callTool({ name: toolName, arguments: args })
       const isError = result?.isError === true
       const content = result?.content
+      const savedPaths: string[] = []
+
+      const saveArtifact = (buffer: Buffer, suggestedExt: string): void => {
+        const rawSaveTo = options?.saveTo?.trim()
+        if (!rawSaveTo) return
+        let resolved = safePath(cwd, rawSaveTo)
+        if (!path.extname(resolved) && suggestedExt) {
+          resolved = `${resolved}.${suggestedExt}`
+        }
+        fs.mkdirSync(path.dirname(resolved), { recursive: true })
+        fs.writeFileSync(resolved, buffer)
+        savedPaths.push(resolved)
+      }
+
       if (Array.isArray(content)) {
         const parts: string[] = []
         let hasBinaryImage = false
         for (const c of content) {
           if (c.type === 'image' && c.data) {
             hasBinaryImage = true
+            const imageBuffer = Buffer.from(c.data, 'base64')
             const filename = `screenshot-${Date.now()}.png`
             const filepath = path.join(UPLOAD_DIR, filename)
-            fs.writeFileSync(filepath, Buffer.from(c.data, 'base64'))
+            fs.writeFileSync(filepath, imageBuffer)
+            saveArtifact(imageBuffer, 'png')
             parts.push(`![Screenshot](/api/uploads/${filename})`)
           } else if (c.type === 'resource' && c.resource?.blob) {
             const ext = c.resource.mimeType?.includes('pdf') ? 'pdf' : 'bin'
+            const resourceBuffer = Buffer.from(c.resource.blob, 'base64')
             const filename = `browser-${Date.now()}.${ext}`
             const filepath = path.join(UPLOAD_DIR, filename)
-            fs.writeFileSync(filepath, Buffer.from(c.resource.blob, 'base64'))
+            fs.writeFileSync(filepath, resourceBuffer)
+            saveArtifact(resourceBuffer, ext)
             parts.push(`[Download ${filename}](/api/uploads/${filename})`)
           } else {
             let text = c.text || ''
@@ -801,6 +1526,14 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                   const filename = `browser-${Date.now()}.${ext}`
                   const destPath = path.join(UPLOAD_DIR, filename)
                   fs.copyFileSync(srcPath, destPath)
+                  if (options?.saveTo?.trim()) {
+                    const raw = options.saveTo.trim()
+                    let targetPath = safePath(cwd, raw)
+                    if (!path.extname(targetPath)) targetPath = `${targetPath}.${ext}`
+                    fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+                    fs.copyFileSync(srcPath, targetPath)
+                    savedPaths.push(targetPath)
+                  }
                   if (IMAGE_EXTS.includes(ext)) {
                     parts.push(`![Screenshot](/api/uploads/${filename})`)
                   } else {
@@ -814,6 +1547,11 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               parts.push(isError ? text : cleanPlaywrightOutput(text))
             }
           }
+        }
+        if (savedPaths.length > 0) {
+          const unique = Array.from(new Set(savedPaths))
+          const rendered = unique.map((p) => path.relative(cwd, p) || '.').join(', ')
+          parts.push(`Saved to: ${rendered}`)
         }
         return parts.join('\n')
       }
@@ -848,7 +1586,10 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             for (const [k, v] of Object.entries(rest)) {
               if (v !== undefined && v !== null && v !== '') args[k] = v
             }
-            return await callMcpTool(mcpTool, args)
+            const saveTo = typeof params.saveTo === 'string' && params.saveTo.trim()
+              ? params.saveTo.trim()
+              : undefined
+            return await callMcpTool(mcpTool, args, { saveTo })
           } catch (err: any) {
             return `Error: ${err.message}`
           }
@@ -859,7 +1600,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             'Control the browser. Use action to specify what to do.',
             'Actions: navigate (url), screenshot, snapshot (get page elements), click (element/ref), type (element/ref, text), press_key (key), select (element/ref, option), evaluate (expression), pdf, upload (paths, ref), wait (text/timeout).',
             'Workflow: use snapshot to see the page and get element refs, then use click/type/select with those refs.',
-            'Screenshots are returned as images visible to the user.',
+            'Screenshots are returned as images visible to the user. Use saveTo to persist screenshot/PDF artifacts to disk.',
           ].join(' '),
           schema: z.object({
             action: z.enum(['navigate', 'screenshot', 'snapshot', 'click', 'type', 'press_key', 'select', 'evaluate', 'pdf', 'upload', 'wait']).describe('The browser action to perform'),
@@ -872,6 +1613,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             expression: z.string().optional().describe('JavaScript expression to evaluate (for evaluate action)'),
             paths: z.array(z.string()).optional().describe('File paths to upload (for upload action)'),
             timeout: z.number().optional().describe('Timeout in milliseconds (for wait action, default 30000)'),
+            saveTo: z.string().optional().describe('Optional output path for screenshot/pdf artifacts (relative to working directory).'),
           }),
         },
       ),
@@ -1010,6 +1752,15 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
       enabled: p.enabled ?? false,
       ...p,
     }),
+    manage_webhooks: (p) => ({
+      name: p.name || 'Unnamed Webhook',
+      source: p.source || 'custom',
+      events: Array.isArray(p.events) ? p.events : [],
+      agentId: p.agentId || null,
+      secret: p.secret || '',
+      isEnabled: p.isEnabled ?? true,
+      ...p,
+    }),
     manage_secrets: (p) => ({
       name: p.name || 'Unnamed Secret',
       service: p.service || 'custom',
@@ -1031,6 +1782,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     manage_schedules: { toolId: 'manage_schedules', label: 'schedules', load: loadSchedules, save: saveSchedules },
     manage_skills: { toolId: 'manage_skills', label: 'skills', load: loadSkills, save: saveSkills },
     manage_connectors: { toolId: 'manage_connectors', label: 'connectors', load: loadConnectors, save: saveConnectors },
+    manage_webhooks: { toolId: 'manage_webhooks', label: 'webhooks', load: loadWebhooks, save: saveWebhooks },
     manage_sessions: { toolId: 'manage_sessions', label: 'sessions', load: loadSessions, save: saveSessions, readOnly: true },
     manage_secrets: { toolId: 'manage_secrets', label: 'secrets', load: loadSecrets, save: saveSecrets },
   }
@@ -1068,6 +1820,8 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
       } else {
         description += `\n\nSet "agentId" to assign a schedule to an agent (including yourself: "${ctx?.agentId || 'unknown'}"). Schedule types: interval (set intervalMs), cron (set cron), once (set runAt). Set taskPrompt for what the agent should do.` + agentSummary
       }
+    } else if (toolKey === 'manage_webhooks') {
+      description += '\n\nUse `source`, `events`, `agentId`, and `secret` when creating webhooks. Inbound calls should POST to `/api/webhooks/{id}` with header `x-webhook-secret` when a secret is configured.'
     }
 
     tools.push(
@@ -1257,10 +2011,200 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
     )
   }
 
+  if (enabledTools.includes('manage_documents')) {
+    tools.push(
+      tool(
+        async ({ action, id, filePath, query, limit, metadata, title }) => {
+          try {
+            const documents = loadDocuments()
+
+            if (action === 'list') {
+              const rows = Object.values(documents)
+                .sort((a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0))
+                .slice(0, Math.max(1, Math.min(limit || 100, 500)))
+                .map((doc: any) => ({
+                  id: doc.id,
+                  title: doc.title,
+                  fileName: doc.fileName,
+                  sourcePath: doc.sourcePath,
+                  textLength: doc.textLength,
+                  method: doc.method,
+                  metadata: doc.metadata || {},
+                  createdAt: doc.createdAt,
+                  updatedAt: doc.updatedAt,
+                }))
+              return JSON.stringify(rows)
+            }
+
+            if (action === 'get') {
+              if (!id) return 'Error: id is required for get.'
+              const doc = documents[id]
+              if (!doc) return `Not found: document "${id}"`
+              const maxContentChars = 60_000
+              return JSON.stringify({
+                ...doc,
+                content: typeof doc.content === 'string' && doc.content.length > maxContentChars
+                  ? `${doc.content.slice(0, maxContentChars)}\n... [truncated]`
+                  : (doc.content || ''),
+              })
+            }
+
+            if (action === 'delete') {
+              if (!id) return 'Error: id is required for delete.'
+              if (!documents[id]) return `Not found: document "${id}"`
+              delete documents[id]
+              saveDocuments(documents)
+              return JSON.stringify({ ok: true, id })
+            }
+
+            if (action === 'upload') {
+              if (!filePath?.trim()) return 'Error: filePath is required for upload.'
+              const sourcePath = path.isAbsolute(filePath) ? filePath : safePath(cwd, filePath)
+              if (!fs.existsSync(sourcePath)) return `Error: file not found: ${filePath}`
+              const stat = fs.statSync(sourcePath)
+              if (!stat.isFile()) return 'Error: upload expects a file path.'
+
+              const extracted = extractDocumentText(sourcePath)
+              const content = trimDocumentContent(extracted.text)
+              if (!content) return 'Error: extracted document text is empty.'
+
+              const docId = crypto.randomBytes(6).toString('hex')
+              const now = Date.now()
+              const parsedMetadata = metadata && typeof metadata === 'string'
+                ? (() => {
+                    try {
+                      const m = JSON.parse(metadata)
+                      return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}
+                    } catch {
+                      return {}
+                    }
+                  })()
+                : {}
+
+              const entry = {
+                id: docId,
+                title: title?.trim() || path.basename(sourcePath),
+                fileName: path.basename(sourcePath),
+                sourcePath,
+                method: extracted.method,
+                textLength: content.length,
+                content,
+                metadata: parsedMetadata,
+                uploadedByAgentId: ctx?.agentId || null,
+                uploadedInSessionId: ctx?.sessionId || null,
+                createdAt: now,
+                updatedAt: now,
+              }
+              documents[docId] = entry
+              saveDocuments(documents)
+              return JSON.stringify({
+                id: entry.id,
+                title: entry.title,
+                fileName: entry.fileName,
+                textLength: entry.textLength,
+                method: entry.method,
+              })
+            }
+
+            if (action === 'search') {
+              const q = (query || '').trim().toLowerCase()
+              if (!q) return 'Error: query is required for search.'
+              const terms = q.split(/\s+/).filter(Boolean)
+              const max = Math.max(1, Math.min(limit || 5, 50))
+
+              const matches = Object.values(documents)
+                .map((doc: any) => {
+                  const hay = (doc.content || '').toLowerCase()
+                  if (!hay) return null
+                  if (!terms.every((term) => hay.includes(term))) return null
+                  let score = hay.includes(q) ? 10 : 0
+                  for (const term of terms) {
+                    let pos = hay.indexOf(term)
+                    while (pos !== -1) {
+                      score += 1
+                      pos = hay.indexOf(term, pos + term.length)
+                    }
+                  }
+                  const firstTerm = terms[0] || q
+                  const at = firstTerm ? hay.indexOf(firstTerm) : -1
+                  const start = at >= 0 ? Math.max(0, at - 120) : 0
+                  const end = Math.min((doc.content || '').length, start + 320)
+                  const snippet = ((doc.content || '').slice(start, end) || '').replace(/\s+/g, ' ').trim()
+                  return {
+                    id: doc.id,
+                    title: doc.title,
+                    score,
+                    snippet,
+                    textLength: doc.textLength,
+                    updatedAt: doc.updatedAt,
+                  }
+                })
+                .filter(Boolean)
+                .sort((a: any, b: any) => b.score - a.score)
+                .slice(0, max)
+
+              return JSON.stringify({
+                query,
+                total: matches.length,
+                matches,
+              })
+            }
+
+            return 'Unknown action. Use list, upload, search, get, or delete.'
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'manage_documents',
+          description: 'Upload and index documents, then search/get/delete them for long-term retrieval. Supports PDFs (via pdftotext) and common text/doc formats.',
+          schema: z.object({
+            action: z.enum(['list', 'upload', 'search', 'get', 'delete']).describe('Document action'),
+            id: z.string().optional().describe('Document id (for get/delete)'),
+            filePath: z.string().optional().describe('Path to document file for upload (relative to working directory or absolute)'),
+            title: z.string().optional().describe('Optional title override for upload'),
+            query: z.string().optional().describe('Search query text (for search)'),
+            limit: z.number().optional().describe('Max results (default 5 for search, 100 for list)'),
+            metadata: z.string().optional().describe('Optional JSON string metadata for upload'),
+          }),
+        },
+      ),
+    )
+  }
+
   if (enabledTools.includes('manage_sessions')) {
     tools.push(
       tool(
-        async ({ action, sessionId, message, limit, agentId, name, waitForReply, timeoutSec, queueMode, heartbeatEnabled, finalStatus }) => {
+        async () => {
+          try {
+            const sessions = loadSessions()
+            const current = ctx?.sessionId ? sessions[ctx.sessionId] : null
+            return JSON.stringify({
+              sessionId: ctx?.sessionId || null,
+              sessionName: current?.name || null,
+              sessionType: current?.sessionType || null,
+              user: current?.user || null,
+              agentId: ctx?.agentId || current?.agentId || null,
+              parentSessionId: current?.parentSessionId || null,
+              heartbeatEnabled: typeof current?.heartbeatEnabled === 'boolean'
+                ? current.heartbeatEnabled
+                : null,
+            })
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'whoami_tool',
+          description: 'Return identity/runtime context for this agent execution (current session id, agent id, session owner, and parent session).',
+          schema: z.object({}),
+        },
+      ),
+    )
+
+    tools.push(
+      tool(
+        async ({ action, sessionId, message, limit, agentId, name, waitForReply, timeoutSec, queueMode, heartbeatEnabled, heartbeatIntervalSec, heartbeatIntervalMs, finalStatus }) => {
           try {
             const sessions = loadSessions()
             if (action === 'list') {
@@ -1289,9 +2233,10 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             }
 
             if (action === 'history') {
-              if (!sessionId) return 'Error: sessionId is required for history.'
-              const target = sessions[sessionId]
-              if (!target) return `Not found: session "${sessionId}"`
+              const targetSessionId = sessionId || ctx?.sessionId || null
+              if (!targetSessionId) return 'Error: sessionId is required for history when no current session context exists.'
+              const target = sessions[targetSessionId]
+              if (!target) return `Not found: session "${targetSessionId}"`
               const max = Math.max(1, Math.min(limit || 20, 100))
               const history = (target.messages || []).slice(-max).map((m: any) => ({
                 role: m.role,
@@ -1299,7 +2244,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 time: m.time,
                 kind: m.kind || 'chat',
               }))
-              return JSON.stringify({ sessionId: target.id, name: target.name, history })
+              return JSON.stringify({ sessionId: target.id, name: target.name, history, currentSessionDefaulted: !sessionId })
             }
 
             if (action === 'status') {
@@ -1381,6 +2326,8 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               const agents = loadAgents()
               const agent = agents[agentId]
               if (!agent) return `Not found: agent "${agentId}"`
+              const sourceSession = ctx?.sessionId ? sessions[ctx.sessionId] : null
+              const ownerUser = sourceSession?.user || 'system'
 
               const id = crypto.randomBytes(4).toString('hex')
               const now = Date.now()
@@ -1388,7 +2335,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 id,
                 name: (name || `${agent.name} Session`).trim(),
                 cwd,
-                user: 'swarm',
+                user: ownerUser,
                 provider: agent.provider || 'claude-cli',
                 model: agent.model || '',
                 credentialId: agent.credentialId || null,
@@ -1401,7 +2348,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 agentId: agent.id,
                 parentSessionId: ctx?.sessionId || null,
                 tools: agent.tools || [],
-                heartbeatEnabled: agent.heartbeatEnabled ?? null,
+                heartbeatEnabled: agent.heartbeatEnabled ?? true,
                 heartbeatIntervalSec: agent.heartbeatIntervalSec ?? null,
               }
               sessions[id] = entry as any
@@ -1433,13 +2380,26 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               if (!targetSessionId) return 'Error: sessionId is required when no current session context exists.'
               const target = sessions[targetSessionId]
               if (!target) return `Not found: session "${targetSessionId}"`
-              if (typeof heartbeatEnabled !== 'boolean') return 'Error: heartbeatEnabled (boolean) is required for set_heartbeat.'
+              const intervalFromMs = typeof heartbeatIntervalMs === 'number'
+                ? Math.max(0, Math.round(heartbeatIntervalMs / 1000))
+                : undefined
+              const nextIntervalSecRaw = typeof heartbeatIntervalSec === 'number'
+                ? heartbeatIntervalSec
+                : intervalFromMs
+              const nextIntervalSec = typeof nextIntervalSecRaw === 'number'
+                ? Math.max(0, Math.min(3600, Math.round(nextIntervalSecRaw)))
+                : undefined
 
-              target.heartbeatEnabled = heartbeatEnabled
+              if (typeof heartbeatEnabled !== 'boolean' && typeof nextIntervalSec !== 'number') {
+                return 'Error: set_heartbeat requires heartbeatEnabled and/or heartbeatIntervalSec/heartbeatIntervalMs.'
+              }
+
+              if (typeof heartbeatEnabled === 'boolean') target.heartbeatEnabled = heartbeatEnabled
+              if (typeof nextIntervalSec === 'number') target.heartbeatIntervalSec = nextIntervalSec
               target.lastActiveAt = Date.now()
 
               let statusMessageAdded = false
-              if (!heartbeatEnabled && finalStatus?.trim()) {
+              if (target.heartbeatEnabled === false && finalStatus?.trim()) {
                 if (!Array.isArray(target.messages)) target.messages = []
                 target.messages.push({
                   role: 'assistant',
@@ -1454,6 +2414,8 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               return JSON.stringify({
                 sessionId: targetSessionId,
                 heartbeatEnabled: target.heartbeatEnabled !== false,
+                heartbeatIntervalSec: target.heartbeatIntervalSec ?? null,
+                heartbeatIntervalMs: typeof target.heartbeatIntervalSec === 'number' ? target.heartbeatIntervalSec * 1000 : null,
                 statusMessageAdded,
               })
             }
@@ -1468,7 +2430,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
           description: 'Session-to-session operations: list/status/history sessions, send messages to other sessions, spawn new agent sessions, stop active runs, and control per-session heartbeat.',
           schema: z.object({
             action: z.enum(['list', 'history', 'status', 'send', 'spawn', 'stop', 'set_heartbeat']).describe('Session action'),
-            sessionId: z.string().optional().describe('Target session id (required for history/status/send/stop; optional for set_heartbeat when current session context exists)'),
+            sessionId: z.string().optional().describe('Target session id (history defaults to current session when omitted; status/send/stop still require explicit sessionId)'),
             message: z.string().optional().describe('Message body (required for send, optional initial task for spawn)'),
             limit: z.number().optional().describe('Max items/messages for list/history'),
             agentId: z.string().optional().describe('Agent id to spawn (required for spawn)'),
@@ -1477,7 +2439,192 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             timeoutSec: z.number().optional().describe('For send with waitForReply=true, max wait time in seconds (default 120)'),
             queueMode: z.enum(['followup', 'steer', 'collect']).optional().describe('Queue mode for send'),
             heartbeatEnabled: z.boolean().optional().describe('For set_heartbeat: true to enable heartbeat, false to disable'),
+            heartbeatIntervalSec: z.number().optional().describe('For set_heartbeat: optional heartbeat interval in seconds (0-3600).'),
+            heartbeatIntervalMs: z.number().optional().describe('For set_heartbeat: optional heartbeat interval in milliseconds (alias of heartbeatIntervalSec).'),
             finalStatus: z.string().optional().describe('For set_heartbeat when disabling: optional final status update to append in the session'),
+          }),
+        },
+      ),
+    )
+
+    tools.push(
+      tool(
+        async ({ query, sessionId, limit, dateRange }) => {
+          try {
+            const sessions = loadSessions()
+            const targetSessionId = sessionId || ctx?.sessionId || null
+            if (!targetSessionId) return 'Error: sessionId is required when no current session context exists.'
+            const target = sessions[targetSessionId]
+            if (!target) return `Not found: session "${targetSessionId}"`
+
+            const from = typeof dateRange?.from === 'number' ? dateRange.from : Number.NEGATIVE_INFINITY
+            const to = typeof dateRange?.to === 'number' ? dateRange.to : Number.POSITIVE_INFINITY
+            const max = Math.max(1, Math.min(limit || 20, 200))
+            const q = (query || '').trim().toLowerCase()
+            const terms = q ? q.split(/\s+/).filter(Boolean) : []
+
+            const scoredAll = (target.messages || [])
+              .map((m: any, idx: number) => ({ ...m, _idx: idx }))
+              .filter((m: any) => {
+                const t = typeof m.time === 'number' ? m.time : 0
+                if (t < from || t > to) return false
+                if (!terms.length) return true
+                const hay = `${m.role || ''}\n${m.kind || ''}\n${m.text || ''}`.toLowerCase()
+                return terms.every((term) => hay.includes(term))
+              })
+              .map((m: any) => {
+                const hay = `${m.text || ''}`.toLowerCase()
+                let score = 0
+                if (q && hay.includes(q)) score += 5
+                for (const term of terms) {
+                  if (hay.includes(term)) score += 1
+                }
+                const ageBoost = Math.max(0, (m.time || 0) / 1e13)
+                score += ageBoost
+                return { ...m, _score: score }
+              })
+              .sort((a: any, b: any) => b._score - a._score)
+            const scored = scoredAll
+              .slice(0, max)
+              .map((m: any) => ({
+                index: m._idx,
+                role: m.role,
+                kind: m.kind || 'chat',
+                time: m.time,
+                text: typeof m.text === 'string' && m.text.length > 1200 ? `${m.text.slice(0, 1200)}...` : (m.text || ''),
+              }))
+
+            return JSON.stringify({
+              sessionId: target.id,
+              name: target.name,
+              query: query || '',
+              limit: max,
+              matches: scored,
+              totalMatches: scoredAll.length,
+              currentSessionDefaulted: !sessionId,
+            })
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'search_history_tool',
+          description: 'Search message history for the current session by default, or another session if sessionId is provided. Useful for recalling prior commitments, decisions, and details.',
+          schema: z.object({
+            query: z.string().describe('Search query text (keywords, phrase, or topic).'),
+            sessionId: z.string().optional().describe('Optional target session id; defaults to current session.'),
+            limit: z.number().optional().describe('Maximum number of matches to return (default 20, max 200).'),
+            dateRange: z.object({
+              from: z.number().optional().describe('Unix epoch ms lower bound (inclusive).'),
+              to: z.number().optional().describe('Unix epoch ms upper bound (inclusive).'),
+            }).optional().describe('Optional time filter for message timestamps.'),
+          }),
+        },
+      ),
+    )
+  }
+
+  if (enabledTools.includes('manage_connectors')) {
+    tools.push(
+      tool(
+        async ({ action, connectorId, platform, to, message, imageUrl, fileUrl, mimeType, fileName, caption }) => {
+          try {
+            const normalizeWhatsAppTarget = (input: string): string => {
+              const raw = input.trim()
+              if (!raw) return raw
+              if (raw.includes('@')) return raw
+              let cleaned = raw.replace(/[^\d+]/g, '')
+              if (cleaned.startsWith('+')) cleaned = cleaned.slice(1)
+              if (cleaned.startsWith('0') && cleaned.length >= 10) {
+                // Match inbound connector normalization (e.g. UK local 07... -> 447...)
+                cleaned = '44' + cleaned.slice(1)
+              }
+              cleaned = cleaned.replace(/[^\d]/g, '')
+              return cleaned ? `${cleaned}@s.whatsapp.net` : raw
+            }
+
+            const { listRunningConnectors, sendConnectorMessage, getConnectorRecentChannelId } = await import('./connectors/manager')
+            const running = listRunningConnectors(platform || undefined)
+
+            if (action === 'list_running' || action === 'list_targets') {
+              return JSON.stringify(running)
+            }
+
+            if (action === 'send') {
+              const hasText = !!message?.trim()
+              const hasMedia = !!imageUrl?.trim() || !!fileUrl?.trim()
+              if (!hasText && !hasMedia) return 'Error: message or media URL is required for send action.'
+              if (!running.length) {
+                return `Error: no running connectors${platform ? ` for platform "${platform}"` : ''}.`
+              }
+
+              const selected = connectorId
+                ? running.find((c) => c.id === connectorId)
+                : running[0]
+              if (!selected) return `Error: running connector not found: ${connectorId}`
+
+              const connectors = loadConnectors()
+              const connector = connectors[selected.id]
+              if (!connector) return `Error: connector not found: ${selected.id}`
+
+              let channelId = to?.trim() || ''
+              if (!channelId) {
+                const outbound = connector.config?.outboundJid?.trim()
+                if (outbound) channelId = outbound
+              }
+              if (!channelId) {
+                const recentChannelId = getConnectorRecentChannelId(selected.id)
+                if (recentChannelId) channelId = recentChannelId
+              }
+              if (!channelId) {
+                const allowed = connector.config?.allowedJids?.split(',').map((s: string) => s.trim()).filter(Boolean) || []
+                if (allowed.length) channelId = allowed[0]
+              }
+              if (!channelId) {
+                return `Error: no target recipient configured. Provide "to", or set connector config "outboundJid"/"allowedJids".`
+              }
+              if (connector.platform === 'whatsapp') {
+                channelId = normalizeWhatsAppTarget(channelId)
+              }
+
+              const sent = await sendConnectorMessage({
+                connectorId: selected.id,
+                channelId,
+                text: message?.trim() || '',
+                imageUrl: imageUrl?.trim() || undefined,
+                fileUrl: fileUrl?.trim() || undefined,
+                mimeType: mimeType?.trim() || undefined,
+                fileName: fileName?.trim() || undefined,
+                caption: caption?.trim() || undefined,
+              })
+              return JSON.stringify({
+                status: 'sent',
+                connectorId: sent.connectorId,
+                platform: sent.platform,
+                to: sent.channelId,
+                messageId: sent.messageId || null,
+              })
+            }
+
+            return 'Unknown action. Use list_running, list_targets, or send.'
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'connector_message_tool',
+          description: 'Send proactive outbound messages through running connectors (for example WhatsApp status updates). Supports listing running connectors/targets and sending text plus optional media links.',
+          schema: z.object({
+            action: z.enum(['list_running', 'list_targets', 'send']).describe('connector messaging action'),
+            connectorId: z.string().optional().describe('Optional connector id. Defaults to the first running connector (or first for selected platform).'),
+            platform: z.string().optional().describe('Optional platform filter (whatsapp, telegram, slack, discord).'),
+            to: z.string().optional().describe('Target channel id / recipient. For WhatsApp, phone number or full JID.'),
+            message: z.string().optional().describe('Message text to send (required for send action).'),
+            imageUrl: z.string().optional().describe('Optional public image URL to attach/send where platform supports media.'),
+            fileUrl: z.string().optional().describe('Optional public file URL to attach/send where platform supports documents.'),
+            mimeType: z.string().optional().describe('Optional MIME type when sending fileUrl.'),
+            fileName: z.string().optional().describe('Optional display file name when sending fileUrl.'),
+            caption: z.string().optional().describe('Optional caption used with image/file sends.'),
           }),
         },
       ),
