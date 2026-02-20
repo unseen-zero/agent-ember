@@ -8,6 +8,7 @@ import { estimateCost } from './cost'
 import { getPluginManager } from './plugins'
 import { loadRuntimeSettings, getAgentLoopRecursionLimit } from './runtime-settings'
 import { getMemoryDb } from './memory-db'
+import { logExecution } from './execution-log'
 import type { Session, Message, UsageRecord } from '@/types'
 
 interface StreamAgentChatOpts {
@@ -43,6 +44,7 @@ function buildToolCapabilityLines(enabledTools: string[]): string[] {
   if (enabledTools.includes('manage_skills')) lines.push('- Skill management is available (`manage_skills`) to add reusable capabilities.')
   if (enabledTools.includes('manage_connectors')) lines.push('- Connector management is available (`manage_connectors`) for channels like WhatsApp/Telegram/Slack, plus proactive outbound notifications via `connector_message_tool`.')
   if (enabledTools.includes('manage_sessions')) lines.push('- Session management is available (`manage_sessions`, `sessions_tool`, `whoami_tool`, `search_history_tool`) for session identity, history lookup, delegation, and inter-session messaging.')
+  if (enabledTools.includes('manage_sessions')) lines.push('- Context management is available (`context_status`, `context_summarize`). Use `context_status` to check token usage and `context_summarize` to compact conversation history when approaching limits.')
   if (enabledTools.includes('manage_secrets')) lines.push('- Secret management is available (`manage_secrets`) for durable encrypted credentials and API tokens.')
   return lines
 }
@@ -121,7 +123,15 @@ function buildAgenticExecutionPolicy(opts: {
   ].filter(Boolean).join('\n')
 }
 
-export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string> {
+export interface StreamAgentChatResult {
+  /** All text accumulated across every LLM turn (for SSE / web UI history). */
+  fullText: string
+  /** Text from only the final LLM turn — after the last tool call completed.
+   *  Use this for connector delivery so intermediate planning text isn't sent. */
+  finalResponse: string
+}
+
+export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<StreamAgentChatResult> {
   const { session, message, imagePath, apiKey, systemPrompt, write, history, fallbackCredentialIds, signal } = opts
 
   // fallbackCredentialIds is intentionally accepted for compatibility with caller signatures.
@@ -247,8 +257,27 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
     return `[Attached file: ${filePath.split('/').pop()}]\n\n${text}`
   }
 
+  // Auto-compaction: prune old history if approaching context window limit
+  let effectiveHistory = history
+  try {
+    const { shouldAutoCompact, consolidateToMemory, slidingWindowCompact, estimateTokens } = await import('./context-manager')
+    const systemPromptTokens = estimateTokens(stateModifier)
+    if (shouldAutoCompact(history, systemPromptTokens, session.provider, session.model)) {
+      // Consolidate important old messages to memory before pruning
+      const oldMessages = history.slice(0, -10)
+      if (oldMessages.length > 0 && session.agentId) {
+        consolidateToMemory(oldMessages, session.agentId, session.id)
+      }
+      // Keep last 10 messages via sliding window
+      effectiveHistory = slidingWindowCompact(history, 10)
+      console.log(`[stream-agent-chat] Auto-compacted session ${session.id}: ${history.length} → ${effectiveHistory.length} messages`)
+    }
+  } catch {
+    // If context manager fails, continue with full history
+  }
+
   const langchainMessages: Array<HumanMessage | AIMessage> = []
-  for (const m of history.slice(-20)) {
+  for (const m of effectiveHistory.slice(-20)) {
     if (m.role === 'user') {
       langchainMessages.push(new HumanMessage({ content: buildLangChainContent(m.text, m.imagePath) }))
     } else {
@@ -260,6 +289,8 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
   langchainMessages.push(new HumanMessage({ content: buildLangChainContent(message, imagePath) }))
 
   let fullText = ''
+  let lastSegment = ''
+  let hasToolCalls = false
   let totalInputTokens = 0
   let totalOutputTokens = 0
 
@@ -301,6 +332,7 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
               : ''
           if (text) {
             fullText += text
+            lastSegment += text
             write(`data: ${JSON.stringify({ t: 'd', text })}\n\n`)
           }
         }
@@ -314,14 +346,21 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
           totalOutputTokens += usage.completionTokens || usage.output_tokens || 0
         }
       } else if (kind === 'on_tool_start') {
+        hasToolCalls = true
+        lastSegment = ''
         const toolName = event.name || 'unknown'
         const input = event.data?.input
         // Plugin hooks: beforeToolExec
         await pluginMgr.runHook('beforeToolExec', { toolName, input })
+        const inputStr = typeof input === 'string' ? input : JSON.stringify(input)
+        logExecution(session.id, 'tool_call', `${toolName} invoked`, {
+          agentId: session.agentId,
+          detail: { toolName, input: inputStr?.slice(0, 4000) },
+        })
         write(`data: ${JSON.stringify({
           t: 'tool_call',
           toolName,
-          toolInput: typeof input === 'string' ? input : JSON.stringify(input),
+          toolInput: inputStr,
         })}\n\n`)
       } else if (kind === 'on_tool_end') {
         const toolName = event.name || 'unknown'
@@ -333,6 +372,29 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
             : JSON.stringify(output)
         // Plugin hooks: afterToolExec
         await pluginMgr.runHook('afterToolExec', { toolName, input: null, output: outputStr })
+        logExecution(session.id, 'tool_result', `${toolName} returned`, {
+          agentId: session.agentId,
+          detail: { toolName, output: outputStr?.slice(0, 4000), error: /^(Error:|error:)/i.test((outputStr || '').trim()) || undefined },
+        })
+        // Enriched file_op logging for file-mutating tools
+        if (['write_file', 'edit_file', 'copy_file', 'move_file', 'delete_file'].includes(toolName)) {
+          const inputData = event.data?.input
+          const inputObj = typeof inputData === 'object' ? inputData : {}
+          logExecution(session.id, 'file_op', `${toolName}: ${inputObj?.filePath || inputObj?.sourcePath || 'unknown'}`, {
+            agentId: session.agentId,
+            detail: { toolName, filePath: inputObj?.filePath, sourcePath: inputObj?.sourcePath, destinationPath: inputObj?.destinationPath, success: !/^Error/i.test((outputStr || '').trim()) },
+          })
+        }
+        // Enriched commit logging for git operations
+        if (toolName === 'execute_command' && outputStr) {
+          const commitMatch = outputStr.match(/\[[\w/-]+\s+([a-f0-9]{7,40})\]/)
+          if (commitMatch) {
+            logExecution(session.id, 'commit', `git commit ${commitMatch[1]}`, {
+              agentId: session.agentId,
+              detail: { commitId: commitMatch[1], outputPreview: outputStr.slice(0, 500) },
+            })
+          }
+        }
         write(`data: ${JSON.stringify({
           t: 'tool_result',
           toolName,
@@ -344,6 +406,7 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
     const errMsg = timedOut
       ? 'Ongoing loop stopped after reaching the configured runtime limit.'
       : err.message || String(err)
+    logExecution(session.id, 'error', errMsg, { agentId: session.agentId, detail: { timedOut } })
     write(`data: ${JSON.stringify({ t: 'err', text: errMsg })}\n\n`)
   } finally {
     if (loopTimer) clearTimeout(loopTimer)
@@ -379,5 +442,12 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<string
   // Clean up browser and other session resources
   await cleanup()
 
-  return fullText
+  // If tools were called, finalResponse is the text from the last LLM turn only.
+  // Fall back to fullText if the last segment is empty (e.g. agent ended on a tool call
+  // with no summary text).
+  const finalResponse = hasToolCalls
+    ? (lastSegment.trim() || fullText)
+    : fullText
+
+  return { fullText, finalResponse }
 }

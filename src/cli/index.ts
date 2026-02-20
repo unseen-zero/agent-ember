@@ -277,7 +277,7 @@ export function buildProgram(): Command {
       status: string
     }) {
       const intervalMs = opts.intervalMs ? Number.parseInt(opts.intervalMs, 10) : undefined
-      if (opts.intervalMs && (!Number.isFinite(intervalMs) || intervalMs <= 0)) {
+      if (opts.intervalMs && (!Number.isFinite(intervalMs) || intervalMs! <= 0)) {
         throw new Error(`Invalid --interval-ms value: ${opts.intervalMs}`)
       }
 
@@ -406,7 +406,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
   const program = buildProgram()
   try {
     await program.parseAsync(['node', 'swarmclaw', ...argv])
-    return process.exitCode ?? 0
+    return (process.exitCode as number | undefined) ?? 0
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error(msg)

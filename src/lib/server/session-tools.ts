@@ -33,6 +33,7 @@ import {
   decryptKey,
 } from './storage'
 import { log } from './logger'
+import { queryLogs, countLogs, clearLogs, type LogCategory } from './execution-log'
 
 const MAX_OUTPUT = 50 * 1024 // 50KB
 const MAX_FILE = 100 * 1024 // 100KB
@@ -2534,7 +2535,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
   if (enabledTools.includes('manage_connectors')) {
     tools.push(
       tool(
-        async ({ action, connectorId, platform, to, message, imageUrl, fileUrl, mimeType, fileName, caption }) => {
+        async ({ action, connectorId, platform, to, message, imageUrl, fileUrl, mediaPath, mimeType, fileName, caption }) => {
           try {
             const normalizeWhatsAppTarget = (input: string): string => {
               const raw = input.trim()
@@ -2600,6 +2601,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
                 text: message?.trim() || '',
                 imageUrl: imageUrl?.trim() || undefined,
                 fileUrl: fileUrl?.trim() || undefined,
+                mediaPath: mediaPath?.trim() || undefined,
                 mimeType: mimeType?.trim() || undefined,
                 fileName: fileName?.trim() || undefined,
                 caption: caption?.trim() || undefined,
@@ -2620,7 +2622,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
         },
         {
           name: 'connector_message_tool',
-          description: 'Send proactive outbound messages through running connectors (for example WhatsApp status updates). Supports listing running connectors/targets and sending text plus optional media links.',
+          description: 'Send proactive outbound messages through running connectors (for example WhatsApp status updates). Supports listing running connectors/targets and sending text plus optional media (URLs or local file paths).',
           schema: z.object({
             action: z.enum(['list_running', 'list_targets', 'send']).describe('connector messaging action'),
             connectorId: z.string().optional().describe('Optional connector id. Defaults to the first running connector (or first for selected platform).'),
@@ -2629,9 +2631,112 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
             message: z.string().optional().describe('Message text to send (required for send action).'),
             imageUrl: z.string().optional().describe('Optional public image URL to attach/send where platform supports media.'),
             fileUrl: z.string().optional().describe('Optional public file URL to attach/send where platform supports documents.'),
-            mimeType: z.string().optional().describe('Optional MIME type when sending fileUrl.'),
-            fileName: z.string().optional().describe('Optional display file name when sending fileUrl.'),
+            mediaPath: z.string().optional().describe('Absolute local file path to send (e.g. a screenshot). Auto-detects mime type from extension. Takes priority over imageUrl/fileUrl.'),
+            mimeType: z.string().optional().describe('Optional MIME type for mediaPath or fileUrl.'),
+            fileName: z.string().optional().describe('Optional display file name for mediaPath or fileUrl.'),
             caption: z.string().optional().describe('Optional caption used with image/file sends.'),
+          }),
+        },
+      ),
+    )
+  }
+
+  // --- Context management tools (always available when manage_sessions is enabled) ---
+  if (enabledTools.includes('manage_sessions')) {
+    tools.push(
+      tool(
+        async () => {
+          try {
+            const { getContextStatus } = await import('./context-manager')
+            const session = resolveCurrentSession()
+            if (!session) return 'Error: no current session context.'
+            const messages = session.messages || []
+            // Rough estimate for system prompt overhead
+            const systemPromptTokens = 2000
+            const status = getContextStatus(messages, systemPromptTokens, session.provider, session.model)
+            return JSON.stringify(status)
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'context_status',
+          description: 'Check current context window usage for this session. Returns estimated tokens used, provider context limit, percentage used, and compaction strategy recommendation.',
+          schema: z.object({}),
+        },
+      ),
+    )
+
+    tools.push(
+      tool(
+        async ({ keepLastN, summaryPrompt }) => {
+          try {
+            const { summarizeAndCompact } = await import('./context-manager')
+            const session = resolveCurrentSession()
+            if (!session) return 'Error: no current session context.'
+            if (!ctx?.sessionId) return 'Error: no session id in context.'
+            const messages = session.messages || []
+            const keep = Math.max(2, Math.min(keepLastN || 10, messages.length))
+
+            if (messages.length <= keep) {
+              return JSON.stringify({ status: 'no_action', reason: 'Not enough messages to compact', messageCount: messages.length })
+            }
+
+            // Simple summarization: concatenate old messages and create a summary
+            // without calling the LLM (the agent can refine via its own capabilities)
+            const generateSummary = async (text: string, prompt?: string): Promise<string> => {
+              // Build a compact summary from the conversation text
+              const lines = text.split('\n\n').filter(Boolean)
+              const keyLines: string[] = []
+              for (const line of lines) {
+                if (line.length > 20) {
+                  // Keep first 200 chars of each substantive message
+                  keyLines.push(line.slice(0, 200))
+                }
+              }
+              // Cap total summary at ~2000 chars
+              let summary = ''
+              for (const line of keyLines) {
+                if (summary.length + line.length > 2000) break
+                summary += line + '\n'
+              }
+              return summary.trim() || 'Previous conversation context was pruned.'
+            }
+
+            const result = await summarizeAndCompact({
+              messages,
+              keepLastN: keep,
+              agentId: ctx?.agentId || session.agentId || null,
+              sessionId: ctx.sessionId,
+              summaryPrompt,
+              generateSummary,
+            })
+
+            // Persist the compacted messages
+            const sessions = loadSessions()
+            const target = sessions[ctx.sessionId]
+            if (target) {
+              target.messages = result.messages
+              saveSessions(sessions)
+            }
+
+            return JSON.stringify({
+              status: 'compacted',
+              prunedCount: result.prunedCount,
+              memoriesStored: result.memoriesStored,
+              summaryAdded: result.summaryAdded,
+              remainingMessages: result.messages.length,
+            })
+          } catch (err: any) {
+            return `Error: ${err.message || String(err)}`
+          }
+        },
+        {
+          name: 'context_summarize',
+          description: 'Summarize and compact the conversation history to free context window space. Old messages are consolidated to memory (preserving decisions, key facts, results) and replaced with a summary. Use context_status first to check if compaction is needed.',
+          schema: z.object({
+            keepLastN: z.number().optional().describe('Number of recent messages to keep (default 10, min 2).'),
+            summaryPrompt: z.string().optional().describe('Custom prompt for how to summarize the old messages.'),
           }),
         },
       ),

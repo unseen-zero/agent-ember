@@ -1,7 +1,9 @@
 import { App, LogLevel } from '@slack/bolt'
+import fs from 'fs'
+import path from 'path'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
-import { downloadInboundMediaToUpload, inferInboundMediaType } from './media'
+import { downloadInboundMediaToUpload, inferInboundMediaType, mimeFromPath, isImageMime } from './media'
 import { isNoMessage } from './manager'
 
 const slack: PlatformConnector = {
@@ -193,6 +195,58 @@ const slack: PlatformConnector = {
 
     return {
       connector,
+      async sendMessage(channelId, text, options) {
+        const webClient = app.client
+
+        // File upload (local path or URL)
+        const hasMedia = options?.mediaPath || options?.imageUrl || options?.fileUrl
+        if (hasMedia) {
+          let fileContent: Buffer | undefined
+          let fileUrl: string | undefined
+          let fileName = options?.fileName || 'attachment'
+
+          if (options?.mediaPath) {
+            if (!fs.existsSync(options.mediaPath)) throw new Error(`File not found: ${options.mediaPath}`)
+            fileContent = fs.readFileSync(options.mediaPath)
+            fileName = options.fileName || path.basename(options.mediaPath)
+          } else {
+            fileUrl = options?.imageUrl || options?.fileUrl
+          }
+
+          if (fileContent) {
+            const result = await webClient.filesUploadV2({
+              channel_id: channelId,
+              file: fileContent,
+              filename: fileName,
+              initial_comment: options?.caption || text || undefined,
+            })
+            return { messageId: (result as any)?.files?.[0]?.id }
+          } else if (fileUrl) {
+            // Send URL as message with unfurl
+            const msg = await webClient.chat.postMessage({
+              channel: channelId,
+              text: `${options?.caption || text || ''}\n${fileUrl}`.trim(),
+              unfurl_links: true,
+              unfurl_media: true,
+            })
+            return { messageId: msg.ts || undefined }
+          }
+        }
+
+        // Text only
+        const payload = text || options?.caption || ''
+        if (payload.length <= 4000) {
+          const msg = await webClient.chat.postMessage({ channel: channelId, text: payload })
+          return { messageId: msg.ts || undefined }
+        }
+        const chunks = payload.match(/[\s\S]{1,3990}/g) || [payload]
+        let lastTs: string | undefined
+        for (const chunk of chunks) {
+          const msg = await webClient.chat.postMessage({ channel: channelId, text: chunk })
+          lastTs = msg.ts || undefined
+        }
+        return { messageId: lastTs }
+      },
       async stop() {
         await app.stop()
         console.log(`[slack] Bot disconnected`)

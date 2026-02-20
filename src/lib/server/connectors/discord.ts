@@ -1,7 +1,9 @@
-import { Client, GatewayIntentBits, Events, Partials } from 'discord.js'
+import { Client, GatewayIntentBits, Events, Partials, AttachmentBuilder } from 'discord.js'
+import fs from 'fs'
+import path from 'path'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
-import { inferInboundMediaType } from './media'
+import { inferInboundMediaType, mimeFromPath, isImageMime } from './media'
 import { isNoMessage } from './manager'
 
 const discord: PlatformConnector = {
@@ -80,6 +82,29 @@ const discord: PlatformConnector = {
 
     return {
       connector,
+      async sendMessage(channelId, text, options) {
+        const channel = await client.channels.fetch(channelId)
+        if (!channel || !('send' in channel) || typeof (channel as any).send !== 'function') {
+          throw new Error(`Cannot send to channel ${channelId}`)
+        }
+
+        const files: AttachmentBuilder[] = []
+        if (options?.mediaPath) {
+          if (!fs.existsSync(options.mediaPath)) throw new Error(`File not found: ${options.mediaPath}`)
+          files.push(new AttachmentBuilder(options.mediaPath, { name: options.fileName || path.basename(options.mediaPath) }))
+        } else if (options?.imageUrl) {
+          files.push(new AttachmentBuilder(options.imageUrl, { name: options.fileName || 'image.png' }))
+        } else if (options?.fileUrl) {
+          files.push(new AttachmentBuilder(options.fileUrl, { name: options.fileName || 'attachment' }))
+        }
+
+        const content = options?.caption || text || undefined
+        const msg = await (channel as any).send({
+          content: content || (files.length ? undefined : '(empty)'),
+          files: files.length ? files : undefined,
+        })
+        return { messageId: msg.id }
+      },
       async stop() {
         client.destroy()
         console.log(`[discord] Bot disconnected`)

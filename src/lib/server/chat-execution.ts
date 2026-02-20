@@ -12,6 +12,7 @@ import {
 } from './storage'
 import { getProvider } from '@/lib/providers'
 import { log } from './logger'
+import { logExecution } from './execution-log'
 import { streamAgentChat } from './stream-agent-chat'
 import { buildSessionTools } from './session-tools'
 import type { MessageToolEvent, SSEEvent } from '@/types'
@@ -283,6 +284,20 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
   const session = sessions[sessionId]
   if (!session) throw new Error(`Session not found: ${sessionId}`)
 
+  // Log the trigger
+  logExecution(sessionId, 'trigger', `${source} message received`, {
+    runId,
+    agentId: session.agentId,
+    detail: {
+      source,
+      internal,
+      provider: session.provider,
+      model: session.model,
+      messagePreview: message.slice(0, 200),
+      hasImage: !!(imagePath || imageUrl),
+    },
+  })
+
   const providerType = session.provider || 'claude-cli'
   const provider = getProvider(providerType)
   if (!provider) throw new Error(`Unknown provider: ${providerType}`)
@@ -340,7 +355,7 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
   try {
     const hasTools = !!session.tools?.length && !CLI_PROVIDER_IDS.has(providerType)
     fullResponse = hasTools
-      ? await streamAgentChat({
+      ? (await streamAgentChat({
           session,
           message,
           imagePath,
@@ -349,7 +364,7 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
           write: (raw) => parseAndEmit(raw),
           history: getSessionMessages(sessionId),
           signal: abortController.signal,
-        })
+        })).fullText
       : await provider.handler.streamChat({
           session,
           message,

@@ -178,6 +178,7 @@ migrateFromJson()
     'manage_secrets',
     'manage_documents',
     'manage_webhooks',
+    'claude_code',
   ]
   const count = (db.prepare('SELECT COUNT(*) as c FROM agents').get() as { c: number }).c
   if (count === 0) {
@@ -192,7 +193,7 @@ migrateFromJson()
 Help users get started with the platform:
 - **Agents**: Create specialized AI agents (Agents tab → "+"). Each agent has a provider, model, system prompt, and optional tools (shell, files, web search, browser). Use "Generate with AI" to scaffold agents from a description.
 - **Orchestrators**: Toggle "Orchestrator" when creating an agent to let it delegate tasks to other agents. Orchestrators coordinate multi-agent workflows automatically.
-- **Providers**: Configure LLM backends in Settings → Providers. Supports Anthropic, OpenAI, Ollama (local or cloud), and OpenAI-compatible endpoints.
+- **Providers**: Configure LLM backends in Settings → Providers. Built-in providers: Claude Code CLI, OpenAI Codex CLI, OpenCode CLI, Anthropic, OpenAI, Google Gemini, DeepSeek, Groq, Together AI, Mistral AI, xAI (Grok), Fireworks AI, Ollama (local or cloud), and OpenClaw. You can also add custom OpenAI-compatible endpoints.
 - **Tasks**: Use the Task Board to create, assign, and track work items. Agents can be assigned to tasks and will execute them autonomously.
 - **Schedules**: Set up cron-based schedules to run agents or tasks on a recurring basis (Schedules tab).
 - **Skills**: Create reusable skill files (markdown instructions) in the Skills tab and attach them to agents to specialize their behavior.

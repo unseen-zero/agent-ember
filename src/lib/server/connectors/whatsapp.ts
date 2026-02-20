@@ -10,7 +10,7 @@ import path from 'path'
 import fs from 'fs'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage } from './types'
-import { saveInboundMediaBuffer } from './media'
+import { saveInboundMediaBuffer, mimeFromPath, isImageMime } from './media'
 import { isNoMessage } from './manager'
 
 const AUTH_DIR = path.join(process.cwd(), 'data', 'whatsapp-auth')
@@ -63,6 +63,22 @@ const whatsapp: PlatformConnector = {
       hasCredentials: hasStoredCreds(authDir),
       async sendMessage(channelId, text, options) {
         if (!sock) throw new Error('WhatsApp connector is not connected')
+        // Local file path takes priority
+        if (options?.mediaPath) {
+          if (!fs.existsSync(options.mediaPath)) throw new Error(`File not found: ${options.mediaPath}`)
+          const buf = fs.readFileSync(options.mediaPath)
+          const mime = options.mimeType || mimeFromPath(options.mediaPath)
+          const caption = options.caption || text || undefined
+          const fName = options.fileName || path.basename(options.mediaPath)
+          let sent
+          if (isImageMime(mime)) {
+            sent = await sock.sendMessage(channelId, { image: buf, caption, mimetype: mime })
+          } else {
+            sent = await sock.sendMessage(channelId, { document: buf, fileName: fName, mimetype: mime, caption })
+          }
+          if (sent?.key?.id) sentMessageIds.add(sent.key.id)
+          return { messageId: sent?.key?.id || undefined }
+        }
         if (options?.imageUrl) {
           const sent = await sock.sendMessage(channelId, {
             image: { url: options.imageUrl },

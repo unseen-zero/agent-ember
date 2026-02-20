@@ -49,6 +49,31 @@ function ensureUploadDir() {
   if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true })
 }
 
+const EXT_MIME_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(MIME_EXT_MAP).map(([m, e]) => [e, m])
+)
+// Add extras not covered by reverse map
+Object.assign(EXT_MIME_MAP, {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain',
+  '.json': 'application/json',
+  '.csv': 'text/csv',
+  '.zip': 'application/zip',
+})
+
+/** Guess MIME type from file extension */
+export function mimeFromPath(filePath: string): string {
+  const ext = normalizeExt(path.extname(filePath))
+  return EXT_MIME_MAP[ext] || 'application/octet-stream'
+}
+
+/** Check if a MIME type is an image */
+export function isImageMime(mime: string): boolean {
+  return mime.startsWith('image/')
+}
+
 export function inferInboundMediaType(mimeType?: string, fileName?: string, fallback: InboundMediaType = 'file'): InboundMediaType {
   const probe = `${mimeType || ''} ${fileName || ''}`.toLowerCase()
   if (probe.includes('image')) return 'image'

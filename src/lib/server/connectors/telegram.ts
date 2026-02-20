@@ -1,7 +1,9 @@
-import { Bot } from 'grammy'
+import { Bot, InputFile } from 'grammy'
+import fs from 'fs'
+import path from 'path'
 import type { Connector } from '@/types'
 import type { PlatformConnector, ConnectorInstance, InboundMessage, InboundMediaType } from './types'
-import { downloadInboundMediaToUpload, inferInboundMediaType } from './media'
+import { downloadInboundMediaToUpload, inferInboundMediaType, mimeFromPath, isImageMime } from './media'
 import { isNoMessage } from './manager'
 
 const telegram: PlatformConnector = {
@@ -167,6 +169,47 @@ const telegram: PlatformConnector = {
 
     return {
       connector,
+      async sendMessage(channelId, text, options) {
+        const chatId = channelId
+        const caption = options?.caption || text || undefined
+
+        // Local file
+        if (options?.mediaPath) {
+          if (!fs.existsSync(options.mediaPath)) throw new Error(`File not found: ${options.mediaPath}`)
+          const mime = options.mimeType || mimeFromPath(options.mediaPath)
+          const inputFile = new InputFile(options.mediaPath, options.fileName || path.basename(options.mediaPath))
+          if (isImageMime(mime)) {
+            const msg = await bot.api.sendPhoto(chatId, inputFile, { caption })
+            return { messageId: String(msg.message_id) }
+          } else {
+            const msg = await bot.api.sendDocument(chatId, inputFile, { caption })
+            return { messageId: String(msg.message_id) }
+          }
+        }
+        // URL-based image
+        if (options?.imageUrl) {
+          const msg = await bot.api.sendPhoto(chatId, options.imageUrl, { caption })
+          return { messageId: String(msg.message_id) }
+        }
+        // URL-based file
+        if (options?.fileUrl) {
+          const msg = await bot.api.sendDocument(chatId, options.fileUrl, { caption })
+          return { messageId: String(msg.message_id) }
+        }
+        // Text only
+        const payload = text || caption || ''
+        if (payload.length <= 4096) {
+          const msg = await bot.api.sendMessage(chatId, payload)
+          return { messageId: String(msg.message_id) }
+        }
+        const chunks = payload.match(/[\s\S]{1,4090}/g) || [payload]
+        let lastId: string | undefined
+        for (const chunk of chunks) {
+          const msg = await bot.api.sendMessage(chatId, chunk)
+          lastId = String(msg.message_id)
+        }
+        return { messageId: lastId }
+      },
       async stop() {
         await bot.stop()
         console.log(`[telegram] Bot stopped`)

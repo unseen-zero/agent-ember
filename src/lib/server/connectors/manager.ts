@@ -4,6 +4,7 @@ import {
   loadAgents, loadCredentials, decryptKey, loadSettings, loadSkills,
 } from '../storage'
 import { streamAgentChat } from '../stream-agent-chat'
+import { logExecution } from '../execution-log'
 import type { Connector } from '@/types'
 import type { ConnectorInstance, InboundMessage, InboundMedia } from './types'
 
@@ -75,9 +76,29 @@ async function routeMessage(connector: Connector, msg: InboundMessage): Promise<
   if (msg?.channelId) {
     lastInboundChannelByConnector.set(connector.id, msg.channelId)
   }
+
   const agents = loadAgents()
   const agent = agents[connector.agentId]
   if (!agent) return '[Error] Connector agent not found.'
+
+  // Log connector trigger
+  const triggerSessionKey = `connector:${connector.id}:${msg.channelId}`
+  const allSessions = loadSessions()
+  const existingSession = Object.values(allSessions).find((s: any) => s.name === triggerSessionKey)
+  if (existingSession) {
+    logExecution(existingSession.id, 'trigger', `${msg.platform} message from ${msg.senderName}`, {
+      agentId: agent.id,
+      detail: {
+        source: 'connector',
+        platform: msg.platform,
+        connectorId: connector.id,
+        channelId: msg.channelId,
+        senderName: msg.senderName,
+        messagePreview: (msg.text || '').slice(0, 200),
+        hasMedia: !!(msg.media?.length || msg.imageUrl),
+      },
+    })
+  }
 
   // Resolve API key for the agent's provider
   let apiKey: string | null = null
@@ -147,13 +168,16 @@ The test: would a thoughtful friend feel compelled to type something back? If no
   const systemPrompt = promptParts.join('\n\n')
 
   // Add message to session
-  const firstImageUrl = msg.imageUrl || msg.media?.find((m) => m.type === 'image' && m.url)?.url
+  const firstImage = msg.media?.find((m) => m.type === 'image')
+  const firstImageUrl = msg.imageUrl || (firstImage?.url) || undefined
+  const firstImagePath = firstImage?.localPath || undefined
   const inboundText = formatInboundUserText(msg)
   session.messages.push({
     role: 'user',
     text: inboundText,
     time: Date.now(),
-    imageUrl: firstImageUrl || undefined,
+    imageUrl: firstImageUrl,
+    imagePath: firstImagePath,
   })
   session.lastActiveAt = Date.now()
   const s1 = loadSessions()
@@ -167,15 +191,18 @@ The test: would a thoughtful friend feel compelled to type something back? If no
 
   if (hasTools) {
     try {
-      fullText = await streamAgentChat({
+      const result = await streamAgentChat({
         session,
         message: msg.text,
+        imagePath: firstImagePath,
         apiKey,
         systemPrompt,
         write: () => {},  // no SSE needed for connectors
         history: session.messages,
       })
-      console.log(`[connector] streamAgentChat returned ${fullText.length} chars`)
+      // Use finalResponse for connectors — strips intermediate planning/tool-use text
+      fullText = result.finalResponse
+      console.log(`[connector] streamAgentChat returned ${result.fullText.length} chars total, ${fullText.length} chars final`)
     } catch (err: any) {
       console.error(`[connector] streamAgentChat error:`, err.message || err)
       return `[Error] ${err.message}`
@@ -189,6 +216,7 @@ The test: would a thoughtful friend feel compelled to type something back? If no
     await provider.handler.streamChat({
       session,
       message: msg.text,
+      imagePath: firstImagePath,
       apiKey,
       systemPrompt,
       write: (data: string) => {
@@ -209,8 +237,24 @@ The test: would a thoughtful friend feel compelled to type something back? If no
   // is already recorded, and saving the sentinel would pollute the LLM's context
   if (isNoMessage(fullText)) {
     console.log(`[connector] Agent returned NO_MESSAGE — suppressing outbound reply`)
+    logExecution(session.id, 'decision', 'Agent suppressed outbound (NO_MESSAGE)', {
+      agentId: agent.id,
+      detail: { platform: msg.platform, channelId: msg.channelId },
+    })
     return NO_MESSAGE_SENTINEL
   }
+
+  // Log outbound message
+  logExecution(session.id, 'outbound', `Reply sent via ${msg.platform}`, {
+    agentId: agent.id,
+    detail: {
+      platform: msg.platform,
+      channelId: msg.channelId,
+      recipientName: msg.senderName,
+      responsePreview: fullText.slice(0, 500),
+      responseLength: fullText.length,
+    },
+  })
 
   // Save assistant response to session
   if (fullText.trim()) {
@@ -450,6 +494,7 @@ export async function sendConnectorMessage(params: {
   text: string
   imageUrl?: string
   fileUrl?: string
+  mediaPath?: string
   mimeType?: string
   fileName?: string
   caption?: string
@@ -487,7 +532,7 @@ export async function sendConnectorMessage(params: {
   }
 
   // Apply NO_MESSAGE filter at the delivery layer so all outbound paths respect it
-  if (isNoMessage(params.text) && !params.imageUrl && !params.fileUrl) {
+  if (isNoMessage(params.text) && !params.imageUrl && !params.fileUrl && !params.mediaPath) {
     console.log(`[connector] sendConnectorMessage: NO_MESSAGE — suppressing outbound send`)
     return { connectorId, platform: connector.platform, channelId: params.channelId }
   }
@@ -495,6 +540,7 @@ export async function sendConnectorMessage(params: {
   const result = await instance.sendMessage(params.channelId, params.text, {
     imageUrl: params.imageUrl,
     fileUrl: params.fileUrl,
+    mediaPath: params.mediaPath,
     mimeType: params.mimeType,
     fileName: params.fileName,
     caption: params.caption,

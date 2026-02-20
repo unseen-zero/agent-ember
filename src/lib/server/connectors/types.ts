@@ -37,6 +37,8 @@ export interface ConnectorInstance {
     options?: {
       imageUrl?: string
       fileUrl?: string
+      /** Absolute local file path (e.g. screenshot saved to disk) */
+      mediaPath?: string
       mimeType?: string
       fileName?: string
       caption?: string
