@@ -177,6 +177,8 @@ Connector sessions preserve attachment visibility in chat context:
 - Telegram and Slack attachments are downloaded to uploads when possible
 - Discord attachments are captured as media metadata/URLs
 
+Agents automatically suppress replies to simple acknowledgments ("ok", "thanks", thumbs-up, etc.) via a `NO_MESSAGE` response — conversations feel natural without a forced reply to every message.
+
 For proactive outreach, `connector_message_tool` supports text plus optional `imageUrl` / `fileUrl` payloads (platform support varies).
 
 ## Agent Tools
