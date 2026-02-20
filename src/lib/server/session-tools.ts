@@ -5,7 +5,8 @@ import path from 'path'
 import crypto from 'crypto'
 import { spawn, spawnSync } from 'child_process'
 import * as cheerio from 'cheerio'
-import { getMemoryDb } from './memory-db'
+import { getMemoryDb, storeMemoryImage } from './memory-db'
+import { loadSettings } from './storage'
 import { loadRuntimeSettings } from './runtime-settings'
 import {
   clearManagedProcess,
@@ -1633,7 +1634,7 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
 
     tools.push(
       tool(
-        async ({ action, key, value, category, query, scope }) => {
+        async ({ action, key, value, category, query, scope, filePaths, imagePath, linkedMemoryIds, depth, targetIds }) => {
           try {
             const scopeMode = scope || 'auto'
             const currentAgentId = ctx?.agentId || null
@@ -1645,33 +1646,81 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               return rows.filter(canAccessMemory)
             }
 
+            // Load configurable limits from settings
+            const settings = loadSettings()
+            const maxDepth = settings.memoryMaxDepth ?? 3
+            const maxPerLookup = settings.memoryMaxPerLookup ?? 20
+            const effectiveDepth = Math.min(depth ?? 0, maxDepth)
+
+            const formatEntry = (m: any) => {
+              let line = `[${m.id}] (${m.agentId ? `agent:${m.agentId}` : 'shared'}) ${m.category}/${m.title}: ${m.content}`
+              if (m.filePaths?.length) line += `\n  files: ${m.filePaths.map((f: any) => `${f.path}${f.contextSnippet ? ` (${f.contextSnippet})` : ''}`).join(', ')}`
+              if (m.imagePath) line += `\n  image: ${m.imagePath}`
+              if (m.linkedMemoryIds?.length) line += `\n  linked: ${m.linkedMemoryIds.join(', ')}`
+              return line
+            }
+
             if (action === 'store') {
+              // Handle image compression if an image path is provided
+              let storedImagePath = imagePath || undefined
+              const entryId = crypto.randomBytes(6).toString('hex')
+              if (imagePath && fs.existsSync(imagePath)) {
+                try {
+                  storedImagePath = await storeMemoryImage(imagePath, entryId)
+                } catch {
+                  storedImagePath = imagePath // fallback to original path
+                }
+              }
+
               const entry = memDb.add({
                 agentId: scopeMode === 'shared' ? null : currentAgentId,
                 sessionId: ctx?.sessionId || null,
                 category: category || 'note',
                 title: key,
                 content: value || '',
+                filePaths: filePaths as any,
+                imagePath: storedImagePath,
+                linkedMemoryIds,
               })
               const memoryScope = entry.agentId ? 'agent' : 'shared'
-              return `Stored ${memoryScope} memory "${key}" (id: ${entry.id})`
+              let result = `Stored ${memoryScope} memory "${key}" (id: ${entry.id})`
+              if (filePaths?.length) result += ` with ${filePaths.length} file reference(s)`
+              if (storedImagePath) result += ` with image`
+              if (linkedMemoryIds?.length) result += ` linked to ${linkedMemoryIds.length} memor${linkedMemoryIds.length === 1 ? 'y' : 'ies'}`
+              return result
             }
             if (action === 'get') {
+              if (effectiveDepth > 0) {
+                const result = memDb.getWithLinked(key, effectiveDepth, maxPerLookup)
+                if (!result) return `Memory not found: ${key}`
+                const accessible = result.entries.filter(canAccessMemory)
+                if (!accessible.length) return 'Error: you do not have access to that memory.'
+                let output = accessible.map(formatEntry).join('\n---\n')
+                if (result.truncated) output += `\n\n[Results truncated at ${maxPerLookup} memories]`
+                return output
+              }
               const found = memDb.get(key)
               if (!found) return `Memory not found: ${key}`
               if (!canAccessMemory(found)) return 'Error: you do not have access to that memory.'
-              const owner = found.agentId ? `agent:${found.agentId}` : 'shared'
-              return `[${found.id}] (${owner}) ${found.category}/${found.title}: ${found.content}`
+              return formatEntry(found)
             }
             if (action === 'search') {
+              if (effectiveDepth > 0) {
+                const result = memDb.searchWithLinked(query || key, undefined, effectiveDepth, maxPerLookup)
+                const accessible = filterScope(result.entries)
+                if (!accessible.length) return 'No memories found.'
+                let output = accessible.map(formatEntry).join('\n')
+                if (result.truncated) output += `\n\n[Results truncated at ${maxPerLookup} memories]`
+                return output
+              }
               const results = filterScope(memDb.search(query || key))
               if (!results.length) return 'No memories found.'
-              return results.map((m) => `[${m.id}] (${m.agentId ? `agent:${m.agentId}` : 'shared'}) ${m.title}: ${m.content}`).join('\n')
+              return results.map(formatEntry).join('\n')
             }
             if (action === 'list') {
               const results = filterScope(memDb.list())
               if (!results.length) return 'No memories stored yet.'
-              return results.map((m) => `[${m.id}] (${m.agentId ? `agent:${m.agentId}` : 'shared'}) ${m.category}/${m.title}: ${m.content}`).join('\n')
+              return results.map(formatEntry).join('\n')
             }
             if (action === 'delete') {
               const found = memDb.get(key)
@@ -1680,21 +1729,42 @@ export function buildSessionTools(cwd: string, enabledTools: string[], ctx?: Too
               memDb.delete(key)
               return `Deleted memory "${key}"`
             }
-            return `Unknown action "${action}". Use: store, get, search, list, or delete.`
+            if (action === 'link') {
+              if (!targetIds?.length) return 'Error: targetIds required for link action.'
+              const result = memDb.link(key, targetIds)
+              if (!result) return `Memory not found: ${key}`
+              return `Linked memory "${key}" to ${targetIds.length} memor${targetIds.length === 1 ? 'y' : 'ies'}: ${targetIds.join(', ')}`
+            }
+            if (action === 'unlink') {
+              if (!targetIds?.length) return 'Error: targetIds required for unlink action.'
+              const result = memDb.unlink(key, targetIds)
+              if (!result) return `Memory not found: ${key}`
+              return `Unlinked ${targetIds.length} memor${targetIds.length === 1 ? 'y' : 'ies'} from "${key}"`
+            }
+            return `Unknown action "${action}". Use: store, get, search, list, delete, link, or unlink.`
           } catch (err: any) {
             return `Error: ${err.message}`
           }
         },
         {
           name: 'memory_tool',
-          description: 'Store and retrieve long-term memories that persist across sessions. Memories can be shared or agent-scoped. Use "store", "get", "search", "list", and "delete".',
+          description: 'Store and retrieve long-term memories that persist across sessions. Memories can be shared or agent-scoped. Supports file references, image attachments, and linking memories together with depth traversal. Use "store", "get", "search", "list", "delete", "link", or "unlink".',
           schema: z.object({
-            action: z.enum(['store', 'get', 'search', 'list', 'delete']).describe('The action to perform'),
-            key: z.string().describe('For store: memory title. For get/delete: memory ID. For search: optional query fallback.'),
+            action: z.enum(['store', 'get', 'search', 'list', 'delete', 'link', 'unlink']).describe('The action to perform'),
+            key: z.string().describe('For store: memory title. For get/delete/link/unlink: memory ID. For search: optional query fallback.'),
             value: z.string().optional().describe('The memory content (for store action)'),
-            category: z.string().optional().describe('Category like "note", "fact", "preference" (for store action, defaults to "note")'),
+            category: z.string().optional().describe('Category like "note", "fact", "preference", "project", "identity" (for store action, defaults to "note")'),
             query: z.string().optional().describe('Search query (alternative to key for search action)'),
             scope: z.enum(['auto', 'shared', 'agent']).optional().describe('Scope hint: auto (shared + own), shared, or agent'),
+            filePaths: z.array(z.object({
+              path: z.string().describe('File or folder path'),
+              contextSnippet: z.string().optional().describe('Brief context about this file reference'),
+              timestamp: z.number().describe('When this file was referenced'),
+            })).optional().describe('File/folder references to attach to the memory (for store action)'),
+            imagePath: z.string().optional().describe('Path to an image file to attach (will be compressed and stored). For store action.'),
+            linkedMemoryIds: z.array(z.string()).optional().describe('IDs of other memories to link to (for store action)'),
+            depth: z.number().optional().describe('How deep to traverse linked memories (for get/search). Respects configured maxDepth limit. Default: 0 (no traversal).'),
+            targetIds: z.array(z.string()).optional().describe('Memory IDs to link/unlink (for link/unlink actions)'),
           }),
         },
       ),

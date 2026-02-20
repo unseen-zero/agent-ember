@@ -213,6 +213,12 @@ export interface Schedule {
   createdAt: number
 }
 
+export interface FileReference {
+  path: string
+  contextSnippet?: string
+  timestamp: number
+}
+
 export interface MemoryEntry {
   id: string
   agentId?: string | null
@@ -221,6 +227,9 @@ export interface MemoryEntry {
   title: string
   content: string
   metadata?: Record<string, string>
+  filePaths?: FileReference[]
+  imagePath?: string | null
+  linkedMemoryIds?: string[]
   createdAt: number
   updatedAt: number
 }
@@ -261,6 +270,8 @@ export interface AppSettings {
   heartbeatActiveStart?: string | null
   heartbeatActiveEnd?: string | null
   heartbeatTimezone?: string | null
+  memoryMaxDepth?: number
+  memoryMaxPerLookup?: number
 }
 
 // --- Orchestrator Secrets ---
@@ -278,7 +289,7 @@ export interface OrchestratorSecret {
 
 // --- Task Board ---
 
-export type BoardTaskStatus = 'backlog' | 'queued' | 'running' | 'completed' | 'failed'
+export type BoardTaskStatus = 'backlog' | 'queued' | 'running' | 'completed' | 'failed' | 'archived'
 
 export interface TaskComment {
   id: string
@@ -385,4 +396,5 @@ export interface BoardTask {
   queuedAt?: number | null
   startedAt?: number | null
   completedAt?: number | null
+  archivedAt?: number | null
 }

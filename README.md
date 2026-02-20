@@ -27,7 +27,7 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 - **Platform Tools** — Agents can manage other agents, tasks, schedules, skills, connectors, sessions, and encrypted secrets via built-in platform tools
 - **Orchestration** — Multi-agent workflows powered by LangGraph with automatic sub-agent routing
 - **Agentic Execution Policy** — Tool-first autonomous action loop with progress updates, evidence-driven answers, and better use of platform tools for long-lived work
-- **Task Board** — Queue and track agent tasks with status, comments, and results
+- **Task Board** — Queue and track agent tasks with status, comments, results, and archiving (soft delete with show/hide toggle)
 - **Background Daemon** — Auto-processes queued tasks and scheduled jobs with a 30s heartbeat plus recurring health monitoring
 - **Scheduling** — Cron-based agent scheduling with human-friendly presets
 - **Loop Runtime Controls** — Switch between bounded and ongoing loops with configurable step caps, runtime guards, heartbeat cadence, and timeout budgets
@@ -37,7 +37,7 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 - **Skills System** — Discover local skills, import skills from URL, and load OpenClaw `SKILL.md` files (frontmatter-compatible)
 - **Execution Logging** — Structured audit trail for triggers, tool calls, file ops, commits, and errors in a dedicated `logs.db`
 - **Context Management** — Auto-compaction of conversation history when approaching context limits, with manual `context_status` and `context_summarize` tools for agents
-- **Memory** — Per-agent and per-session memory with hybrid FTS5 + vector embeddings search. Platform knowledge auto-seeded on fresh installs
+- **Memory** — Per-agent and per-session memory with hybrid FTS5 + vector embeddings search. Supports file references, image attachments, and linked memories with BFS graph traversal. Platform knowledge auto-seeded on fresh installs
 - **Cost Tracking** — Per-message token counting and cost estimation displayed in the chat header
 - **Model Failover** — Automatic key rotation on rate limits and auth errors with configurable fallback credentials
 - **Plugin System** — Extend agent behavior with JS plugins (hooks: beforeAgentStart, afterAgentComplete, beforeToolExec, afterToolExec, onMessage)
@@ -198,7 +198,7 @@ Agents can use the following tools when enabled:
 | Web Fetch | Fetch and extract text content from URLs (uses cheerio) |
 | CLI Delegation | Delegate complex tasks to Claude Code, Codex CLI, or OpenCode CLI |
 | Browser | Playwright-powered web browsing via MCP (navigate, click, type, screenshot, PDF) |
-| Memory | Store and retrieve long-term memories with FTS5 + vector search |
+| Memory | Store and retrieve long-term memories with FTS5 + vector search, file references, image attachments, and linked memory graph traversal |
 
 ### Platform Tools
 
@@ -423,7 +423,7 @@ swarmclaw [global-options] <group> <command> [command-options]
 | `sessions` | `list`, `get`, `history`, `send`, `spawn`, `stop` |
 | `settings` | `get`, `update` |
 | `skills` | `list`, `get`, `create`, `update`, `delete`, `import` |
-| `tasks` | `list`, `get`, `create`, `update`, `delete` |
+| `tasks` | `list`, `get`, `create`, `update`, `delete`, `archive` |
 | `tts` | `voices` |
 | `upload` | `file` |
 | `uploads` | `list`, `get`, `delete` |

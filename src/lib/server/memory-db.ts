@@ -1,10 +1,16 @@
 import Database from 'better-sqlite3'
 import path from 'path'
 import crypto from 'crypto'
-import type { MemoryEntry } from '@/types'
+import fs from 'fs'
+import type { MemoryEntry, FileReference } from '@/types'
 import { getEmbedding, cosineSimilarity, serializeEmbedding, deserializeEmbedding } from './embeddings'
 
 const DB_PATH = path.join(process.cwd(), 'data', 'memory.db')
+const IMAGES_DIR = path.join(process.cwd(), 'data', 'memory-images')
+
+// Default memory limits
+const DEFAULT_MAX_DEPTH = 3
+const DEFAULT_MAX_PER_LOOKUP = 20
 
 // Simple cache for query embeddings to avoid blocking
 const embeddingCache = new Map<string, number[]>()
@@ -22,6 +28,30 @@ function getEmbeddingSync(query: string): number[] | null {
     }
   }).catch(() => { /* ok */ })
   return null
+}
+
+/** Compress an image file and store it in the memory-images directory. Returns the relative path. */
+export async function storeMemoryImage(sourcePath: string, memoryId: string): Promise<string> {
+  // Ensure images directory exists
+  fs.mkdirSync(IMAGES_DIR, { recursive: true })
+
+  const ext = path.extname(sourcePath).toLowerCase()
+  const destFilename = `${memoryId}${ext === '.png' || ext === '.jpg' || ext === '.jpeg' || ext === '.gif' ? ext : '.jpg'}`
+  const destPath = path.join(IMAGES_DIR, destFilename)
+
+  try {
+    // Try to use sharp for compression
+    const sharp = (await import('sharp')).default
+    await sharp(sourcePath)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 75 })
+      .toFile(destPath.replace(/\.[^.]+$/, '.jpg'))
+    return `data/memory-images/${destFilename.replace(/\.[^.]+$/, '.jpg')}`
+  } catch {
+    // Fallback: copy file as-is if sharp is not available
+    fs.copyFileSync(sourcePath, destPath)
+    return `data/memory-images/${destFilename}`
+  }
 }
 
 let _db: ReturnType<typeof initDb> | null = null
@@ -49,6 +79,9 @@ function initDb() {
     'agentId TEXT',
     'sessionId TEXT',
     'embedding BLOB',
+    'filePaths TEXT',
+    'imagePath TEXT',
+    'linkedMemoryIds TEXT',
   ]) {
     try { db.exec(`ALTER TABLE memories ADD COLUMN ${col}`) } catch { /* already exists */ }
   }
@@ -112,7 +145,7 @@ function initDb() {
       {
         category: 'platform',
         title: 'swarmclaw_memory_system',
-        content: `Agent memory lives in a separate database (data/memory.db) from the main app DB. It uses hybrid search: FTS5 full-text search plus optional vector embeddings (cosine similarity, threshold 0.3). Memory operations: store (save knowledge with category/title/content), search (keyword + vector), get (by ID), delete. Memories can be scoped to an agentId and/or sessionId. Use the memory tool with action "store" to save important facts, and "search" to recall them later. Categories include: note, fact, context, platform, and any custom string.`,
+        content: `Agent memory lives in a separate database (data/memory.db) from the main app DB. It uses hybrid search: FTS5 full-text search plus optional vector embeddings (cosine similarity, threshold 0.3). Memory operations: store (save knowledge with category/title/content/filePaths/imagePath/linkedMemoryIds), search (keyword + vector with depth traversal), get (by ID with linked memory traversal), link/unlink (manage memory links), delete. Memories can be scoped to an agentId and/or sessionId. Use the memory tool with action "store" to save important facts, and "search" to recall them later. Categories include: note, fact, context, platform, and any custom string. Memories support file references, image attachments, and linking to other memories for graph traversal.`,
       },
       {
         category: 'platform',
@@ -160,15 +193,20 @@ function initDb() {
 
   const stmts = {
     insert: db.prepare(`
-      INSERT INTO memories (id, agentId, sessionId, category, title, content, metadata, embedding, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, agentId, sessionId, category, title, content, metadata, embedding, filePaths, imagePath, linkedMemoryIds, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     update: db.prepare(`
-      UPDATE memories SET agentId=?, sessionId=?, category=?, title=?, content=?, metadata=?, embedding=?, updatedAt=?
+      UPDATE memories SET agentId=?, sessionId=?, category=?, title=?, content=?, metadata=?, embedding=?, filePaths=?, imagePath=?, linkedMemoryIds=?, updatedAt=?
       WHERE id=?
     `),
     delete: db.prepare(`DELETE FROM memories WHERE id=?`),
     getById: db.prepare(`SELECT * FROM memories WHERE id=?`),
+    getByIds: (ids: string[]) => {
+      if (!ids.length) return []
+      const placeholders = ids.map(() => '?').join(',')
+      return db.prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`).all(...ids) as any[]
+    },
     listAll: db.prepare(`SELECT * FROM memories ORDER BY updatedAt DESC LIMIT 200`),
     listByAgent: db.prepare(`SELECT * FROM memories WHERE agentId=? ORDER BY updatedAt DESC LIMIT 200`),
     search: db.prepare(`
@@ -185,13 +223,55 @@ function initDb() {
       ORDER BY rank
       LIMIT 100
     `),
+    // Remove a linked ID from all memories that reference it (cleanup on delete)
+    findMemoriesLinkingTo: db.prepare(`SELECT * FROM memories WHERE linkedMemoryIds LIKE ?`),
   }
 
   function rowToEntry(row: any): MemoryEntry {
     return {
       ...row,
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      filePaths: row.filePaths ? JSON.parse(row.filePaths) : undefined,
+      imagePath: row.imagePath || undefined,
+      linkedMemoryIds: row.linkedMemoryIds ? JSON.parse(row.linkedMemoryIds) : undefined,
     }
+  }
+
+  /** BFS traversal of linked memories starting from seed entries */
+  function traverseLinked(
+    seedEntries: MemoryEntry[],
+    maxDepth: number = DEFAULT_MAX_DEPTH,
+    maxResults: number = DEFAULT_MAX_PER_LOOKUP,
+  ): { entries: MemoryEntry[]; truncated: boolean } {
+    if (maxDepth <= 0) return { entries: seedEntries.slice(0, maxResults), truncated: seedEntries.length > maxResults }
+
+    const seen = new Set<string>()
+    const result: MemoryEntry[] = []
+    let queue: MemoryEntry[] = [...seedEntries]
+    let depth = 0
+    let truncated = false
+
+    while (queue.length > 0 && depth <= maxDepth) {
+      const nextQueue: MemoryEntry[] = []
+      for (const entry of queue) {
+        if (seen.has(entry.id)) continue
+        seen.add(entry.id)
+        result.push(entry)
+        if (result.length >= maxResults) {
+          truncated = true
+          return { entries: result, truncated }
+        }
+        // Only follow links if we haven't reached max depth
+        if (depth < maxDepth && entry.linkedMemoryIds?.length) {
+          const linkedRows = stmts.getByIds(entry.linkedMemoryIds.filter((lid) => !seen.has(lid)))
+          nextQueue.push(...linkedRows.map(rowToEntry))
+        }
+      }
+      queue = nextQueue
+      depth++
+    }
+
+    return { entries: result, truncated }
   }
 
   const getAllWithEmbeddings = db.prepare(
@@ -210,6 +290,9 @@ function initDb() {
         data.category, data.title, data.content,
         data.metadata ? JSON.stringify(data.metadata) : null,
         null, // embedding computed async
+        data.filePaths?.length ? JSON.stringify(data.filePaths) : null,
+        data.imagePath || null,
+        data.linkedMemoryIds?.length ? JSON.stringify(data.linkedMemoryIds) : null,
         now, now,
       )
       // Compute embedding in background (fire-and-forget)
@@ -234,6 +317,9 @@ function initDb() {
         merged.category, merged.title, merged.content,
         merged.metadata ? JSON.stringify(merged.metadata) : null,
         existing.embedding, // preserve existing embedding
+        merged.filePaths?.length ? JSON.stringify(merged.filePaths) : null,
+        merged.imagePath || null,
+        merged.linkedMemoryIds?.length ? JSON.stringify(merged.linkedMemoryIds) : null,
         now, id,
       )
       // Re-compute embedding if content changed
@@ -251,13 +337,64 @@ function initDb() {
     },
 
     delete(id: string) {
+      // Clean up image file if present
+      const row = stmts.getById.get(id) as any
+      if (row?.imagePath) {
+        const imgPath = path.join(process.cwd(), row.imagePath)
+        try { fs.unlinkSync(imgPath) } catch { /* file may not exist */ }
+      }
       stmts.delete.run(id)
+      // Remove this ID from any other memory's linkedMemoryIds
+      const linking = stmts.findMemoriesLinkingTo.all(`%"${id}"%`) as any[]
+      for (const row of linking) {
+        const ids: string[] = JSON.parse(row.linkedMemoryIds || '[]')
+        const filtered = ids.filter((lid: string) => lid !== id)
+        db.prepare(`UPDATE memories SET linkedMemoryIds = ? WHERE id = ?`).run(
+          filtered.length ? JSON.stringify(filtered) : null,
+          row.id,
+        )
+      }
     },
 
     get(id: string): MemoryEntry | null {
       const row = stmts.getById.get(id) as any
       if (!row) return null
       return rowToEntry(row)
+    },
+
+    /** Get a memory and its linked memories via BFS traversal */
+    getWithLinked(id: string, maxDepth?: number, maxResults?: number): { entries: MemoryEntry[]; truncated: boolean } | null {
+      const row = stmts.getById.get(id) as any
+      if (!row) return null
+      const entry = rowToEntry(row)
+      return traverseLinked([entry], maxDepth ?? DEFAULT_MAX_DEPTH, maxResults ?? DEFAULT_MAX_PER_LOOKUP)
+    },
+
+    /** Add links from one memory to others */
+    link(id: string, targetIds: string[]): MemoryEntry | null {
+      const existing = stmts.getById.get(id) as any
+      if (!existing) return null
+      const entry = rowToEntry(existing)
+      const current = new Set(entry.linkedMemoryIds || [])
+      for (const tid of targetIds) current.add(tid)
+      const linkedMemoryIds = [...current]
+      db.prepare(`UPDATE memories SET linkedMemoryIds = ?, updatedAt = ? WHERE id = ?`).run(
+        JSON.stringify(linkedMemoryIds), Date.now(), id,
+      )
+      return { ...entry, linkedMemoryIds, updatedAt: Date.now() }
+    },
+
+    /** Remove links from one memory to others */
+    unlink(id: string, targetIds: string[]): MemoryEntry | null {
+      const existing = stmts.getById.get(id) as any
+      if (!existing) return null
+      const entry = rowToEntry(existing)
+      const removeSet = new Set(targetIds)
+      const linkedMemoryIds = (entry.linkedMemoryIds || []).filter((lid) => !removeSet.has(lid))
+      db.prepare(`UPDATE memories SET linkedMemoryIds = ?, updatedAt = ? WHERE id = ?`).run(
+        linkedMemoryIds.length ? JSON.stringify(linkedMemoryIds) : null, Date.now(), id,
+      )
+      return { ...entry, linkedMemoryIds, updatedAt: Date.now() }
     },
 
     search(query: string, agentId?: string): MemoryEntry[] {
@@ -305,6 +442,13 @@ function initDb() {
         }
       }
       return merged.slice(0, 100)
+    },
+
+    /** Search with linked memory traversal */
+    searchWithLinked(query: string, agentId?: string, maxDepth?: number, maxResults?: number): { entries: MemoryEntry[]; truncated: boolean } {
+      const baseResults = this.search(query, agentId)
+      if (!maxDepth || maxDepth <= 0) return { entries: baseResults.slice(0, maxResults ?? DEFAULT_MAX_PER_LOOKUP), truncated: baseResults.length > (maxResults ?? DEFAULT_MAX_PER_LOOKUP) }
+      return traverseLinked(baseResults, maxDepth, maxResults ?? DEFAULT_MAX_PER_LOOKUP)
     },
 
     list(agentId?: string): MemoryEntry[] {

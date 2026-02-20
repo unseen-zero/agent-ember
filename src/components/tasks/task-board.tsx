@@ -6,7 +6,7 @@ import { updateTask } from '@/lib/tasks'
 import { TaskColumn } from './task-column'
 import type { BoardTaskStatus } from '@/types'
 
-const COLUMNS: BoardTaskStatus[] = ['backlog', 'queued', 'running', 'completed', 'failed']
+const ACTIVE_COLUMNS: BoardTaskStatus[] = ['backlog', 'queued', 'running', 'completed', 'failed']
 
 export function TaskBoard() {
   const tasks = useAppStore((s) => s.tasks)
@@ -14,6 +14,8 @@ export function TaskBoard() {
   const loadAgents = useAppStore((s) => s.loadAgents)
   const setTaskSheetOpen = useAppStore((s) => s.setTaskSheetOpen)
   const setEditingTaskId = useAppStore((s) => s.setEditingTaskId)
+  const showArchived = useAppStore((s) => s.showArchivedTasks)
+  const setShowArchived = useAppStore((s) => s.setShowArchivedTasks)
 
   useEffect(() => {
     loadTasks()
@@ -21,6 +23,8 @@ export function TaskBoard() {
     const interval = setInterval(loadTasks, 5000)
     return () => clearInterval(interval)
   }, [])
+
+  const columns: BoardTaskStatus[] = showArchived ? [...ACTIVE_COLUMNS, 'archived'] : ACTIVE_COLUMNS
 
   const tasksByStatus = (status: BoardTaskStatus) =>
     Object.values(tasks)
@@ -34,6 +38,8 @@ export function TaskBoard() {
     await loadTasks()
   }, [tasks, loadTasks])
 
+  const archivedCount = Object.values(tasks).filter((t) => t.status === 'archived').length
+
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       <div className="flex items-center justify-between px-8 pt-6 pb-4 shrink-0">
@@ -41,21 +47,33 @@ export function TaskBoard() {
           <h1 className="font-display text-[28px] font-800 tracking-[-0.03em]">Task Board</h1>
           <p className="text-[13px] text-text-3 mt-1">Create tasks and assign orchestrators to run them sequentially</p>
         </div>
-        <button
-          onClick={() => {
-            setEditingTaskId(null)
-            setTaskSheetOpen(true)
-          }}
-          className="px-5 py-2.5 rounded-[12px] border-none bg-[#6366F1] text-white text-[14px] font-600 cursor-pointer
-            hover:brightness-110 active:scale-[0.97] transition-all shadow-[0_2px_12px_rgba(99,102,241,0.2)]"
-          style={{ fontFamily: 'inherit' }}
-        >
-          + New Task
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowArchived(!showArchived)}
+            className={`px-4 py-2 rounded-[10px] text-[13px] font-600 cursor-pointer transition-all border
+              ${showArchived
+                ? 'bg-white/[0.06] border-white/[0.1] text-text-2'
+                : 'bg-transparent border-white/[0.06] text-text-3 hover:bg-white/[0.03]'}`}
+            style={{ fontFamily: 'inherit' }}
+          >
+            {showArchived ? 'Hide' : 'Show'} Archived{!showArchived && archivedCount > 0 ? '' : ''}
+          </button>
+          <button
+            onClick={() => {
+              setEditingTaskId(null)
+              setTaskSheetOpen(true)
+            }}
+            className="px-5 py-2.5 rounded-[12px] border-none bg-[#6366F1] text-white text-[14px] font-600 cursor-pointer
+              hover:brightness-110 active:scale-[0.97] transition-all shadow-[0_2px_12px_rgba(99,102,241,0.2)]"
+            style={{ fontFamily: 'inherit' }}
+          >
+            + New Task
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 flex gap-5 px-8 pb-6 overflow-x-auto overflow-y-hidden">
-        {COLUMNS.map((status) => (
+        {columns.map((status) => (
           <TaskColumn key={status} status={status} tasks={tasksByStatus(status)} onDrop={handleDrop} />
         ))}
       </div>

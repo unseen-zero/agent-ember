@@ -5,6 +5,18 @@ import type { BoardTask } from '@/types'
 
 let processing = false
 
+/** Disable heartbeat on a task's session when the task finishes. */
+function disableSessionHeartbeat(sessionId: string | null | undefined) {
+  if (!sessionId) return
+  const sessions = loadSessions()
+  const session = sessions[sessionId]
+  if (!session || session.heartbeatEnabled === false) return
+  session.heartbeatEnabled = false
+  session.lastActiveAt = Date.now()
+  saveSessions(sessions)
+  console.log(`[queue] Disabled heartbeat on session ${sessionId} (task finished)`)
+}
+
 export function enqueueTask(taskId: string) {
   const tasks = loadTasks()
   const task = tasks[taskId] as BoardTask | undefined
@@ -98,6 +110,7 @@ export async function processNext() {
             createdAt: Date.now(),
           })
           saveTasks(t2)
+          disableSessionHeartbeat(t2[taskId].sessionId)
         }
         console.log(`[queue] Task "${task.title}" completed`)
       } catch (err: any) {
@@ -121,6 +134,7 @@ export async function processNext() {
             })
           }
           saveTasks(t2)
+          disableSessionHeartbeat(t2[taskId].sessionId)
         }
       }
 
@@ -134,6 +148,27 @@ export async function processNext() {
     }
   } finally {
     processing = false
+  }
+}
+
+/** On boot, disable heartbeat on sessions whose tasks are already completed/failed. */
+export function cleanupFinishedTaskSessions() {
+  const tasks = loadTasks()
+  const sessions = loadSessions()
+  let cleaned = 0
+  for (const task of Object.values(tasks) as BoardTask[]) {
+    if ((task.status === 'completed' || task.status === 'failed') && task.sessionId) {
+      const session = sessions[task.sessionId]
+      if (session && session.heartbeatEnabled !== false) {
+        session.heartbeatEnabled = false
+        session.lastActiveAt = Date.now()
+        cleaned++
+      }
+    }
+  }
+  if (cleaned > 0) {
+    saveSessions(sessions)
+    console.log(`[queue] Disabled heartbeat on ${cleaned} session(s) with finished tasks`)
   }
 }
 

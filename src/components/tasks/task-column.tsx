@@ -10,6 +10,7 @@ const COLUMN_CONFIG: Record<BoardTaskStatus, { label: string; color: string; dot
   running: { label: 'Running', color: 'text-blue-400', dot: 'bg-blue-400' },
   completed: { label: 'Completed', color: 'text-emerald-400', dot: 'bg-emerald-400' },
   failed: { label: 'Failed', color: 'text-red-400', dot: 'bg-red-400' },
+  archived: { label: 'Archived', color: 'text-text-3/50', dot: 'bg-white/10' },
 }
 
 interface Props {

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
-import { createTask, updateTask, deleteTask } from '@/lib/tasks'
+import { createTask, updateTask, archiveTask, unarchiveTask } from '@/lib/tasks'
 import { api } from '@/lib/api-client'
 import { BottomSheet } from '@/components/shared/bottom-sheet'
 import { AiGenBlock } from '@/components/shared/ai-gen-block'
@@ -134,9 +134,17 @@ export function TaskSheet() {
     e.target.value = ''
   }
 
-  const handleDelete = async () => {
+  const handleArchive = async () => {
     if (editing) {
-      await deleteTask(editing.id)
+      await archiveTask(editing.id)
+      await loadTasks()
+      onClose()
+    }
+  }
+
+  const handleUnarchive = async () => {
+    if (editing) {
+      await unarchiveTask(editing.id)
       await loadTasks()
       onClose()
     }
@@ -348,9 +356,14 @@ export function TaskSheet() {
       )}
 
       <div className="flex gap-3 pt-2 border-t border-white/[0.04]">
-        {editing && (
-          <button onClick={handleDelete} className="py-3.5 px-6 rounded-[14px] border border-red-500/20 bg-transparent text-red-400 text-[15px] font-600 cursor-pointer hover:bg-red-500/10 transition-all" style={{ fontFamily: 'inherit' }}>
-            Delete
+        {editing && editing.status !== 'archived' && (
+          <button onClick={handleArchive} className="py-3.5 px-6 rounded-[14px] border border-white/[0.08] bg-transparent text-text-3 text-[15px] font-600 cursor-pointer hover:bg-white/[0.04] transition-all" style={{ fontFamily: 'inherit' }}>
+            Archive
+          </button>
+        )}
+        {editing && editing.status === 'archived' && (
+          <button onClick={handleUnarchive} className="py-3.5 px-6 rounded-[14px] border border-accent-bright/20 bg-transparent text-accent-bright text-[15px] font-600 cursor-pointer hover:bg-accent-bright/10 transition-all" style={{ fontFamily: 'inherit' }}>
+            Unarchive
           </button>
         )}
         {editing && editing.status === 'backlog' && (

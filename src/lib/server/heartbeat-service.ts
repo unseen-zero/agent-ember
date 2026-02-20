@@ -134,6 +134,19 @@ async function tickHeartbeats() {
   const agents = loadAgents()
   const hasScopedAgents = Object.values(agents).some((a: any) => a?.heartbeatEnabled === true)
 
+  // Prune tracked sessions that no longer exist or have heartbeat disabled
+  for (const trackedId of state.lastBySession.keys()) {
+    const s = sessions[trackedId] as any
+    if (!s) {
+      state.lastBySession.delete(trackedId)
+      continue
+    }
+    const cfg = heartbeatConfigForSession(s, settings, agents)
+    if (!cfg.enabled) {
+      state.lastBySession.delete(trackedId)
+    }
+  }
+
   for (const session of Object.values(sessions) as any[]) {
     if (!session?.id) continue
     if (!Array.isArray(session.tools) || session.tools.length === 0) continue
@@ -169,9 +182,27 @@ async function tickHeartbeats() {
   }
 }
 
+/**
+ * Seed lastBySession from persisted lastActiveAt values so that a cold restart
+ * doesn't cause every session to fire a heartbeat immediately on the first tick.
+ */
+function seedLastActive() {
+  const sessions = loadSessions()
+  for (const session of Object.values(sessions) as any[]) {
+    if (!session?.id) continue
+    if (typeof session.lastActiveAt === 'number' && session.lastActiveAt > 0) {
+      // Only seed entries we don't already have (preserves HMR state)
+      if (!state.lastBySession.has(session.id)) {
+        state.lastBySession.set(session.id, session.lastActiveAt)
+      }
+    }
+  }
+}
+
 export function startHeartbeatService() {
   if (state.running) return
   state.running = true
+  seedLastActive()
   state.timer = setInterval(() => {
     tickHeartbeats().catch((err) => {
       log.error('heartbeat', 'Heartbeat tick failed', err?.message || String(err))

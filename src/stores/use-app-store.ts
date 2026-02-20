@@ -83,7 +83,9 @@ interface AppState {
   setEditingSecretId: (id: string | null) => void
 
   tasks: Record<string, BoardTask>
-  loadTasks: () => Promise<void>
+  loadTasks: (includeArchived?: boolean) => Promise<void>
+  showArchivedTasks: boolean
+  setShowArchivedTasks: (show: boolean) => void
   taskSheetOpen: boolean
   setTaskSheetOpen: (open: boolean) => void
   editingTaskId: string | null
@@ -280,13 +282,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   setEditingSecretId: (id) => set({ editingSecretId: id }),
 
   tasks: {},
-  loadTasks: async () => {
+  loadTasks: async (includeArchived) => {
     try {
-      const tasks = await fetchTasks()
+      const show = includeArchived ?? get().showArchivedTasks
+      const tasks = await fetchTasks(show)
       set({ tasks })
     } catch {
       // ignore
     }
+  },
+  showArchivedTasks: false,
+  setShowArchivedTasks: (show) => {
+    set({ showArchivedTasks: show })
+    get().loadTasks(show)
   },
   taskSheetOpen: false,
   setTaskSheetOpen: (open) => set({ taskSheetOpen: open }),

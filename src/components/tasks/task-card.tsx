@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react'
 import { useAppStore } from '@/stores/use-app-store'
-import { updateTask } from '@/lib/tasks'
+import { updateTask, archiveTask } from '@/lib/tasks'
 import type { BoardTask, BoardTaskStatus } from '@/types'
 
 function timeAgo(ts: number) {
@@ -27,6 +27,12 @@ export function TaskCard({ task }: { task: BoardTask }) {
   const handleQueue = async (e: React.MouseEvent) => {
     e.stopPropagation()
     await updateTask(task.id, { status: 'queued' })
+    await loadTasks()
+  }
+
+  const handleArchive = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    await archiveTask(task.id)
     await loadTasks()
   }
 
@@ -116,6 +122,17 @@ export function TaskCard({ task }: { task: BoardTask }) {
             style={{ fontFamily: 'inherit' }}
           >
             View
+          </button>
+        )}
+
+        {(task.status === 'completed' || task.status === 'failed') && !task.sessionId && (
+          <button
+            onClick={handleArchive}
+            className="ml-auto px-2.5 py-1 rounded-[8px] text-[11px] font-600 bg-white/[0.04] text-text-3 border-none cursor-pointer
+              opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white/[0.08]"
+            style={{ fontFamily: 'inherit' }}
+          >
+            Archive
           </button>
         )}
       </div>

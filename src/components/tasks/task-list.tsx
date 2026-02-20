@@ -10,6 +10,7 @@ const STATUS_DOT: Record<BoardTaskStatus, string> = {
   running: 'bg-blue-400 animate-pulse',
   completed: 'bg-emerald-400',
   failed: 'bg-red-400',
+  archived: 'bg-white/10',
 }
 
 export function TaskList({ inSidebar }: { inSidebar?: boolean }) {

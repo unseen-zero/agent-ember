@@ -227,7 +227,8 @@ const COMMAND_GROUPS = {
       get: { description: 'Get task by id', method: 'GET', path: '/tasks/:id', params: ['id'] },
       create: { description: 'Create task', method: 'POST', path: '/tasks' },
       update: { description: 'Update task', method: 'PUT', path: '/tasks/:id', params: ['id'] },
-      delete: { description: 'Delete task', method: 'DELETE', path: '/tasks/:id', params: ['id'] },
+      delete: { description: 'Archive task', method: 'DELETE', path: '/tasks/:id', params: ['id'] },
+      archive: { description: 'Archive task', method: 'DELETE', path: '/tasks/:id', params: ['id'] },
     },
   },
   webhooks: {

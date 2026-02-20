@@ -1,5 +1,5 @@
 import { loadQueue, loadSchedules, loadSessions } from './storage'
-import { processNext } from './queue'
+import { processNext, cleanupFinishedTaskSessions } from './queue'
 import { startScheduler, stopScheduler } from './scheduler'
 import { sweepOrphanedBrowsers, getActiveBrowserCount } from './session-tools'
 import { autoStartConnectors, stopAllConnectors, listRunningConnectors, sendConnectorMessage } from './connectors/manager'
@@ -9,7 +9,8 @@ const QUEUE_CHECK_INTERVAL = 30_000 // 30 seconds
 const BROWSER_SWEEP_INTERVAL = 60_000 // 60 seconds
 const BROWSER_MAX_AGE = 10 * 60 * 1000 // 10 minutes idle = orphaned
 const HEALTH_CHECK_INTERVAL = 120_000 // 2 minutes
-const HEALTH_ALERT_COOLDOWN_MS = 10 * 60 * 1000 // 10 minutes per unique issue
+const STALE_MULTIPLIER = 4 // session is stale after N × heartbeat interval
+const STALE_MIN_MS = 4 * 60 * 1000 // minimum 4 minutes regardless of interval
 
 function parseHeartbeatIntervalSec(value: unknown, fallback = 120): number {
   const parsed = typeof value === 'number'
@@ -40,20 +41,23 @@ const ds: {
   queueIntervalId: ReturnType<typeof setInterval> | null
   browserSweepId: ReturnType<typeof setInterval> | null
   healthIntervalId: ReturnType<typeof setInterval> | null
-  issueLastAlertAt: Map<string, number>
+  /** Session IDs we've already alerted as stale (alert-once semantics). */
+  staleSessionIds: Set<string>
   running: boolean
   lastProcessedAt: number | null
 } = (globalThis as any)[gk] ?? ((globalThis as any)[gk] = {
   queueIntervalId: null,
   browserSweepId: null,
   healthIntervalId: null,
-  issueLastAlertAt: new Map<string, number>(),
+  staleSessionIds: new Set<string>(),
   running: false,
   lastProcessedAt: null,
 })
 
 // Backfill fields for hot-reloaded daemon state objects from older code versions.
-if (!ds.issueLastAlertAt) ds.issueLastAlertAt = new Map<string, number>()
+if (!ds.staleSessionIds) ds.staleSessionIds = new Set<string>()
+// Migrate from old issueLastAlertAt map if present (HMR across code versions)
+if ((ds as any).issueLastAlertAt) delete (ds as any).issueLastAlertAt
 if (ds.healthIntervalId === undefined) ds.healthIntervalId = null
 
 export function startDaemon() {
@@ -69,6 +73,7 @@ export function startDaemon() {
   ds.running = true
   console.log('[daemon] Starting daemon (scheduler + queue processor + heartbeat)')
 
+  cleanupFinishedTaskSessions()
   startScheduler()
   startQueueProcessor()
   startBrowserSweep()
@@ -135,12 +140,7 @@ function stopQueueProcessor() {
   }
 }
 
-async function sendHealthAlert(issueKey: string, text: string) {
-  const now = Date.now()
-  const last = ds.issueLastAlertAt.get(issueKey) || 0
-  if (now - last < HEALTH_ALERT_COOLDOWN_MS) return
-  ds.issueLastAlertAt.set(issueKey, now)
-
+async function sendHealthAlert(text: string) {
   console.warn(`[health] ${text}`)
   try {
     const running = listRunningConnectors('whatsapp')
@@ -162,6 +162,7 @@ async function sendHealthAlert(issueKey: string, text: string) {
 async function runHealthChecks() {
   const sessions = loadSessions()
   const now = Date.now()
+  const currentlyStale = new Set<string>()
 
   for (const session of Object.values(sessions) as any[]) {
     if (!session?.id) continue
@@ -169,15 +170,26 @@ async function runHealthChecks() {
 
     const intervalSec = parseHeartbeatIntervalSec(session.heartbeatIntervalSec, 120)
     if (intervalSec <= 0) continue
-    const staleAfter = Math.max(intervalSec * 4000, 4 * 60 * 1000) // 4x interval, min 4 minutes
+    const staleAfter = Math.max(intervalSec * STALE_MULTIPLIER * 1000, STALE_MIN_MS)
     const lastActive = typeof session.lastActiveAt === 'number' ? session.lastActiveAt : 0
     if (lastActive <= 0) continue
 
     if (now - lastActive > staleAfter) {
-      await sendHealthAlert(
-        `heartbeat-stale:${session.id}`,
-        `Session "${session.name || session.id}" heartbeat appears stale (last active ${(Math.round((now - lastActive) / 1000))}s ago, interval ${intervalSec}s).`,
-      )
+      currentlyStale.add(session.id)
+      // Only alert on transition from healthy → stale (once per stale episode)
+      if (!ds.staleSessionIds.has(session.id)) {
+        ds.staleSessionIds.add(session.id)
+        await sendHealthAlert(
+          `Session "${session.name || session.id}" heartbeat appears stale (last active ${(Math.round((now - lastActive) / 1000))}s ago, interval ${intervalSec}s).`,
+        )
+      }
+    }
+  }
+
+  // Clear recovered sessions so they can re-alert if they go stale again later
+  for (const id of ds.staleSessionIds) {
+    if (!currentlyStale.has(id)) {
+      ds.staleSessionIds.delete(id)
     }
   }
 }
@@ -221,7 +233,7 @@ export function getDaemonStatus() {
     heartbeat: getHeartbeatServiceStatus(),
     health: {
       monitorActive: !!ds.healthIntervalId,
-      trackedIssues: ds.issueLastAlertAt.size,
+      staleSessions: ds.staleSessionIds.size,
       checkIntervalSec: Math.trunc(HEALTH_CHECK_INTERVAL / 1000),
     },
   }
