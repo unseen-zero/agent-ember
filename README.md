@@ -365,7 +365,7 @@ The dev server binds to `0.0.0.0` so you can access it from your phone on the sa
 
 ## CLI
 
-SwarmClaw ships a local CLI client powered by Commander.
+SwarmClaw ships a full-featured CLI with complete API coverage:
 
 ```bash
 # show command help
@@ -385,50 +385,104 @@ swarmclaw [global-options] <group> <command> [command-options]
 
 | Flag | Description |
 |-|-|
-| `-u, --url <url>` | SwarmClaw base URL (default: `http://localhost:3456`) |
-| `-k, --key <key>` | Access key (or set `SWARMCLAW_ACCESS_KEY`) |
-| `--raw` | Print compact JSON |
+| `--base-url <url>` | SwarmClaw base URL (default: `http://localhost:3456`) |
+| `--access-key <key>` | Access key (or set `SWARMCLAW_API_KEY` env or `~/.swarmclaw/platform-api-key.txt`) |
+| `--data <json|@file|->` | Request JSON body (use `@file` to read from file, `-` for stdin) |
+| `--query key=value` | Query parameter (repeatable) |
+| `--header key=value` | Extra HTTP header (repeatable) |
+| `--json` | Output compact JSON |
+| `--wait` | Wait for run/task completion when runId/taskId is returned |
+| `--timeout-ms <ms>` | Request/wait timeout (default: 300000) |
+| `--interval-ms <ms>` | Poll interval for `--wait` (default: 2000) |
+| `--out <file>` | Write binary response to file |
 
-### Command Groups
+### Command Groups (27 groups, full API coverage)
 
 | Group | Commands |
 |-|-|
-| `agents` | `list`, `get` |
-| `tasks` | `list`, `get`, `create` |
-| `schedules` | `list`, `get`, `create` |
-| `sessions` | `list`, `history` |
-| `memory` | `search`, `store` |
-| `connectors` | `list` |
-| `webhooks` | `list`, `create` |
+| `agents` | `list`, `get`, `create`, `update`, `delete` |
+| `auth` | `login`, `logout`, `status` |
+| `claude-skills` | `list`, `get` |
+| `connectors` | `list`, `get`, `create`, `update`, `delete`, `start`, `stop` |
+| `credentials` | `list`, `get`, `create`, `update`, `delete` |
+| `daemon` | `status`, `start`, `stop` |
+| `dirs` | `list` |
+| `documents` | `list`, `upload`, `search`, `get`, `delete` |
+| `generate` | `agent`, `skill` |
+| `ip` | `get` |
+| `logs` | `get` |
+| `memory` | `list`, `store`, `get`, `search`, `delete` |
+| `orchestrator` | `status` |
+| `plugins` | `list`, `get`, `create`, `update`, `delete`, `install` |
+| `providers` | `list`, `get`, `create`, `update`, `delete` |
+| `runs` | `list`, `get` |
+| `schedules` | `list`, `get`, `create`, `update`, `delete` |
+| `secrets` | `list`, `get`, `create`, `update`, `delete` |
+| `sessions` | `list`, `get`, `history`, `send`, `spawn`, `stop` |
+| `settings` | `get`, `update` |
+| `skills` | `list`, `get`, `create`, `update`, `delete`, `import` |
+| `tasks` | `list`, `get`, `create`, `update`, `delete` |
+| `tts` | `voices` |
+| `upload` | `file` |
+| `uploads` | `list`, `get`, `delete` |
+| `usage` | `get` |
+| `version` | (shows version) |
+| `webhooks` | `list`, `get`, `create`, `update`, `delete` |
 
 ### Examples
 
 ```bash
 # list agents
-npm run cli -- agents list
+swarmclaw agents list
 
-# get one agent
-npm run cli -- agents get <agentId>
+# get agent details
+swarmclaw agents get <agentId>
 
 # create a task
-npm run cli -- tasks create --title "Fix flaky CI test" --description "Stabilize retry logic" --agent-id <agentId>
+swarmclaw tasks create --title "Fix flaky CI test" --description "Stabilize retry logic" --agent-id <agentId>
 
 # create an interval schedule
-npm run cli -- schedules create --name "Health Check" --agent-id <agentId> --task-prompt "Run diagnostics" --schedule-type interval --interval-ms 60000
+swarmclaw schedules create --name "Health Check" --agent-id <agentId> --task-prompt "Run diagnostics" --schedule-type interval --interval-ms 60000
 
 # session history
-npm run cli -- sessions history <sessionId>
+swarmclaw sessions history <sessionId>
+
+# send a message to a session
+swarmclaw sessions send <sessionId> --data '{"message":"Hello agent"}'
 
 # store and search memory
-npm run cli -- memory store --title "Deploy note" --content "Use canary first" --category note --agent-id <agentId>
-npm run cli -- memory search -q "canary"
+swarmclaw memory store --title "Deploy note" --content "Use canary first" --category note --agent-id <agentId>
+swarmclaw memory search --query "canary"
 
-# list connectors
-npm run cli -- connectors list
+# upload a document
+swarmclaw upload file ./docs/spec.pdf
+
+# search documents
+swarmclaw documents search --query "implementation details"
+
+# manage secrets
+swarmclaw secrets create --key "API_KEY" --value "secret123"
+
+# daemon control
+swarmclaw daemon status
+swarmclaw daemon start
+swarmclaw daemon stop
 
 # create and list webhooks
-npm run cli -- webhooks create --name "GitHub Push" --agent-id <agentId> --event push --secret "supersecret"
-npm run cli -- webhooks list
+swarmclaw webhooks create --name "GitHub Push" --source "github" --agent-id <agentId> --events push --secret "webhook-secret"
+swarmclaw webhooks list
+
+# generate an agent from description
+swarmclaw generate agent --description "A code review specialist that focuses on security and performance"
+
+# import a skill from URL
+swarmclaw skills import --url https://swarmclaw.ai/skills/swarmclaw-bootstrap/SKILL.md
+
+# get usage statistics
+swarmclaw usage get
+
+# check IP (for webhook configuration)
+swarmclaw ip get
 ```
 
 ## Credits
