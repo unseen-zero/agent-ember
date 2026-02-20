@@ -7,6 +7,8 @@ const os = require('os')
 const path = require('path')
 
 const {
+  COMMANDS,
+  extractPathParams,
   getApiCoveragePairs,
   parseArgv,
   runCli,
@@ -202,4 +204,78 @@ test('wait polls run endpoint until terminal state', async () => {
   assert.match(stdout.toString(), /"runId": "run_1"/)
   assert.match(stdout.toString(), /\[wait\] run run_1: queued/)
   assert.match(stdout.toString(), /"status": "completed"/)
+})
+
+test('all command definitions execute with a mocked API transport', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarmclaw-cli-all-'))
+  const uploadPath = path.join(tmpDir, 'upload.txt')
+  fs.writeFileSync(uploadPath, 'upload payload', 'utf8')
+
+  for (const command of COMMANDS) {
+    const stdout = makeWritable()
+    const stderr = makeWritable()
+    const pathArgs = extractPathParams(command.route).map((name, index) => {
+      if (name === 'filename') return `file-${index}.txt`
+      return `${name}-${index + 1}`
+    })
+
+    const argv = [command.group, command.action, ...pathArgs]
+    if (command.requestType === 'upload') {
+      argv.push(uploadPath)
+    }
+
+    if (command.bodyFlagMap && Object.prototype.hasOwnProperty.call(command.bodyFlagMap, 'key')) {
+      argv.push('--key', 'test-key')
+    }
+    if (command.bodyFlagMap && Object.prototype.hasOwnProperty.call(command.bodyFlagMap, 'text')) {
+      argv.push('--text', 'hello from test')
+    }
+
+    const calls = []
+    const fetchImpl = async (url, init) => {
+      calls.push({ url: String(url), init })
+
+      if (command.clientGetRoute) {
+        const id = pathArgs[0]
+        return jsonResponse([{ id }])
+      }
+
+      if (command.responseType === 'binary') {
+        return new Response(Buffer.from('ok'), {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' },
+        })
+      }
+
+      if (command.responseType === 'sse') {
+        return new Response('data: {"t":"md","text":"ok"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      }
+
+      return jsonResponse({ ok: true })
+    }
+
+    const exitCode = await runCli(argv, {
+      fetchImpl,
+      stdout,
+      stderr,
+      env: {
+        SWARMCLAW_API_KEY: 'test-key',
+      },
+      cwd: process.cwd(),
+    })
+
+    assert.equal(exitCode, 0, `command failed: ${command.group} ${command.action}`)
+    assert.equal(calls.length, 1, `expected one request for ${command.group} ${command.action}`)
+    assert.equal(stderr.toString(), '', `unexpected stderr for ${command.group} ${command.action}`)
+
+    if (command.requestType === 'upload') {
+      assert.ok(Buffer.isBuffer(calls[0].init.body))
+      assert.equal(calls[0].init.headers['x-filename'], 'upload.txt')
+    }
+  }
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
 })
