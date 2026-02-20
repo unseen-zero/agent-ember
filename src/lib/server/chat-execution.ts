@@ -457,10 +457,42 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
   const shouldPersistAssistant = finalText.length > 0
     && (!internal || finalText !== 'HEARTBEAT_OK')
 
-  if (shouldPersistAssistant) {
-    const fresh = loadSessions()
-    const current = fresh[sessionId]
-    if (current) {
+  const normalizeResumeId = (value: unknown): string | null =>
+    typeof value === 'string' && value.trim() ? value.trim() : null
+
+  const fresh = loadSessions()
+  const current = fresh[sessionId]
+  if (current) {
+    let changed = false
+    const persistField = (key: string, value: unknown) => {
+      const normalized = normalizeResumeId(value)
+      if ((current as any)[key] !== normalized) {
+        ;(current as any)[key] = normalized
+        changed = true
+      }
+    }
+
+    persistField('claudeSessionId', session.claudeSessionId)
+    persistField('codexThreadId', session.codexThreadId)
+    persistField('opencodeSessionId', session.opencodeSessionId)
+
+    const sourceResume = session.delegateResumeIds
+    if (sourceResume && typeof sourceResume === 'object') {
+      const currentResume = (current.delegateResumeIds && typeof current.delegateResumeIds === 'object')
+        ? current.delegateResumeIds
+        : {}
+      const nextResume = {
+        claudeCode: normalizeResumeId((sourceResume as any).claudeCode ?? (currentResume as any).claudeCode),
+        codex: normalizeResumeId((sourceResume as any).codex ?? (currentResume as any).codex),
+        opencode: normalizeResumeId((sourceResume as any).opencode ?? (currentResume as any).opencode),
+      }
+      if (JSON.stringify(currentResume) !== JSON.stringify(nextResume)) {
+        current.delegateResumeIds = nextResume
+        changed = true
+      }
+    }
+
+    if (shouldPersistAssistant) {
       current.messages.push({
         role: 'assistant',
         text: finalText,
@@ -468,6 +500,10 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
         toolEvents: toolEvents.length ? toolEvents : undefined,
         kind: internal ? 'heartbeat' : 'chat',
       })
+      changed = true
+    }
+
+    if (changed) {
       current.lastActiveAt = Date.now()
       fresh[sessionId] = current
       saveSessions(fresh)
