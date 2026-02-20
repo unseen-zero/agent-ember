@@ -177,7 +177,7 @@ Connector sessions preserve attachment visibility in chat context:
 - Telegram and Slack attachments are downloaded to uploads when possible
 - Discord attachments are captured as media metadata/URLs
 
-Agents automatically suppress replies to simple acknowledgments ("ok", "thanks", thumbs-up, etc.) via a `NO_MESSAGE` response — conversations feel natural without a forced reply to every message.
+Agents automatically suppress replies to simple acknowledgments ("ok", "thanks", thumbs-up, etc.) via a `NO_MESSAGE` response — conversations feel natural without a forced reply to every message. This is handled at the connector layer, so agents can return `NO_MESSAGE` as their response content and the platform won't deliver anything to the channel.
 
 For proactive outreach, `connector_message_tool` supports text plus optional `imageUrl` / `fileUrl` payloads (platform support varies).
 
@@ -379,27 +379,33 @@ npm run cli -- sessions list
 
 ### Command Groups
 
-- `auth`
-- `agents`
-- `sessions`
-- `tasks`
-- `schedules`
-- `memory`
-- `connectors`
-- `providers`
-- `credentials`
-- `secrets`
-- `skills`
-- `settings`
-- `daemon`
-- `runs`
-- `logs`
-- `plugins`
-- `usage`
-- `version`
-- `orchestrator`
-- `dirs`
-- `upload`
+- `auth` — Access key auth helpers
+- `agents` — Manage agents
+- `sessions` — Manage chat sessions and runtime controls
+- `tasks` — Manage task board items
+- `schedules` — Manage schedules
+- `memory` — Manage memory entries
+- `connectors` — Manage chat connectors (Discord, Slack, Telegram, WhatsApp)
+- `providers` — Manage providers and model overrides
+- `credentials` — Manage encrypted provider credentials
+- `secrets` — Manage reusable encrypted secrets
+- `skills` — Manage reusable skills
+- `settings` — Read/update app settings
+- `daemon` — Control background daemon
+- `runs` — Session run queue/history
+- `logs` — Read or clear app logs
+- `plugins` — Manage plugins and marketplace
+- `usage` — Usage and cost summary
+- `version` — Version and update checks
+- `orchestrator` — Trigger orchestrator runs
+- `dirs` — Directory listing and native picker
+- `upload` / `uploads` — Upload/download artifacts
+- `documents` — Document upload/download helpers
+- `tts` — Text-to-speech endpoint
+- `generate` — AI generation endpoints
+- `ip` — Get local IP/port metadata
+- `webhooks` — Trigger inbound webhook endpoint
+- `claude-skills` — Read local Claude skills directory metadata
 
 ### Examples
 

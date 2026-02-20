@@ -97,13 +97,13 @@ const COMMAND_GROUPS = [
   },
   {
     name: 'documents',
-    description: 'Document upload/download helpers (uploads API)',
+    description: 'Manage documents',
     commands: [
-      cmd('upload', 'POST', '/upload', 'Upload document/file', {
-        requestType: 'upload',
-        inputPositional: 'filePath',
-      }),
-      cmd('get', 'GET', '/uploads/:filename', 'Download document/file', { responseType: 'binary' }),
+      cmd('list', 'GET', '/documents', 'List documents'),
+      cmd('get', 'GET', '/documents/:id', 'Get document by id'),
+      cmd('create', 'POST', '/documents', 'Create document', { expectsJsonBody: true }),
+      cmd('update', 'PUT', '/documents/:id', 'Update document', { expectsJsonBody: true }),
+      cmd('delete', 'DELETE', '/documents/:id', 'Delete document'),
     ],
   },
   {
