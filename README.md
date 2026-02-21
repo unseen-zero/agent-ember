@@ -385,11 +385,30 @@ SwarmClaw has a built-in update checker — a banner appears in the sidebar when
 
 ```bash
 npm run dev          # Dev server on 0.0.0.0:3456
+npm run dev:webpack  # Fallback to webpack dev server (if Turbopack crashes)
+npm run dev:clean    # Clear .next cache then restart dev server
 npm run build        # Production build
+npm run start        # Start production server
+npm run start:standalone # Start standalone server after build
 npm run lint         # ESLint
 ```
 
 The dev server binds to `0.0.0.0` so you can access it from your phone on the same network.
+
+### Turbopack Panic Recovery
+
+If you see a Turbopack panic like `Failed to lookup task type` or missing `.sst/.meta` files:
+
+```bash
+rm -rf .next
+npm run dev:clean
+```
+
+If it still reproduces, use webpack mode:
+
+```bash
+npm run dev:webpack
+```
 
 ## CLI
 
