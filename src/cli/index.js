@@ -231,6 +231,10 @@ const COMMAND_GROUPS = [
       cmd('delete', 'DELETE', '/sessions/:id', 'Delete session'),
       cmd('delete-many', 'DELETE', '/sessions', 'Delete multiple sessions (body: {"ids":[...]})', { expectsJsonBody: true }),
       cmd('messages', 'GET', '/sessions/:id/messages', 'Get session messages'),
+      cmd('main-loop', 'GET', '/sessions/:id/main-loop', 'Get main mission loop state'),
+      cmd('main-loop-action', 'POST', '/sessions/:id/main-loop', 'Control main mission loop (pause/resume/set_goal/set_mode/clear_events/nudge)', {
+        expectsJsonBody: true,
+      }),
       cmd('chat', 'POST', '/sessions/:id/chat', 'Send chat message (streaming)', {
         expectsJsonBody: true,
         responseType: 'sse',

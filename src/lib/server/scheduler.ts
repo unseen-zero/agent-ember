@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { loadSchedules, saveSchedules, loadAgents, loadTasks, saveTasks } from './storage'
 import { enqueueTask } from './queue'
 import { CronExpressionParser } from 'cron-parser'
+import { pushMainLoopEventToMainSessions } from './main-agent-loop'
 
 const TICK_INTERVAL = 60_000 // 60 seconds
 let intervalId: ReturnType<typeof setInterval> | null = null
@@ -58,6 +59,10 @@ async function tick() {
       console.error(`[scheduler] Agent ${schedule.agentId} not found for schedule ${schedule.id}`)
       schedule.status = 'failed'
       saveSchedules(schedules)
+      pushMainLoopEventToMainSessions({
+        type: 'schedule_failed',
+        text: `Schedule failed: "${schedule.name}" (${schedule.id}) — agent ${schedule.agentId} not found.`,
+      })
       continue
     }
 
@@ -101,5 +106,9 @@ async function tick() {
     }
     saveTasks(tasks)
     enqueueTask(taskId)
+    pushMainLoopEventToMainSessions({
+      type: 'schedule_fired',
+      text: `Schedule fired: "${schedule.name}" (${schedule.id}) queued task "${tasks[taskId].title}" (${taskId}).`,
+    })
   }
 }

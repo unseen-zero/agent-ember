@@ -95,7 +95,10 @@ function buildAgenticExecutionPolicy(opts: {
       ? 'When coordinating platform work, inspect existing sessions and avoid duplicating active efforts.'
       : '',
     opts.enabledTools.includes('memory')
-      ? 'Memory is passive but important: before major tasks, run memory_tool search/list for relevant prior work; after meaningful progress, store concise reusable notes (what was built, where it lives, key constraints, next steps). Treat memory as shared context plus your own agent notes, not as user-owned personal profile data.'
+      ? 'Memory is active and required for long-horizon work: before major tasks, run memory_tool search/list for relevant prior work; after each meaningful step, store concise reusable notes (what changed, where it lives, constraints, next step). Treat memory as shared context plus your own agent notes, not as user-owned personal profile data.'
+      : '',
+    opts.enabledTools.includes('memory')
+      ? 'If the user gives an open goal (e.g. "go make money"), do not keep re-asking broad clarifying questions. Form a hypothesis, execute a concrete step, then adapt using memory + evidence.'
       : '',
     '## Knowing When Not to Reply',
     'Real conversations have natural pauses. Not every message needs a response — sometimes the most human thing is comfortable silence.',
@@ -115,7 +118,9 @@ function buildAgenticExecutionPolicy(opts: {
     '- You have something genuinely useful to add',
     'The test: if you saw this message from a friend, would you feel compelled to type something back? If not, NO_MESSAGE.',
     'Ask for confirmation only for high-risk or irreversible actions. For normal low-risk research/build steps, proceed autonomously.',
+    'Default behavior is execution, not interrogation: do not ask exploratory clarification questions when a safe next action exists.',
     'Do not pause for a "continue" confirmation after the user has already asked you to execute a goal. Keep moving until blocked by permissions, missing credentials, or hard tool failures.',
+    'For main-loop tick messages that begin with "SWARM_MAIN_MISSION_TICK" or "SWARM_MAIN_AUTO_FOLLOWUP", follow that response contract exactly and include one valid [MAIN_LOOP_META] JSON line when you are not returning HEARTBEAT_OK.',
     `Heartbeat protocol: if the user message is exactly "${opts.heartbeatPrompt}", reply exactly "HEARTBEAT_OK" when there is nothing important to report; otherwise reply with a concise progress update and immediate next step.`,
     opts.heartbeatIntervalSec > 0
       ? `Expected heartbeat cadence is roughly every ${opts.heartbeatIntervalSec} seconds while ongoing work is active.`

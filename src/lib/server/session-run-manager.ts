@@ -1,9 +1,10 @@
 import crypto from 'crypto'
 import type { SSEEvent } from '@/types'
-import { active } from './storage'
+import { active, loadSessions } from './storage'
 import { executeSessionChatTurn, type ExecuteChatTurnResult } from './chat-execution'
 import { loadRuntimeSettings } from './runtime-settings'
 import { log } from './logger'
+import { handleMainLoopRunResult, type MainLoopFollowupRequest } from './main-agent-loop'
 
 export type SessionRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type SessionQueueMode = 'followup' | 'steer' | 'collect'
@@ -139,6 +140,27 @@ function cancelPendingForSession(sessionId: string, reason: string): number {
   return cancelled
 }
 
+function scheduleMainLoopFollowup(sessionId: string, followup: MainLoopFollowupRequest) {
+  const delayMs = Math.max(0, Math.trunc(followup.delayMs || 0))
+  setTimeout(() => {
+    try {
+      const sessions = loadSessions()
+      const session = sessions[sessionId]
+      if (!session || session.name !== '__main__') return
+      enqueueSessionRun({
+        sessionId,
+        message: followup.message,
+        internal: true,
+        source: 'main-loop-followup',
+        mode: 'collect',
+        dedupeKey: followup.dedupeKey,
+      })
+    } catch (err: any) {
+      log.warn('session-run', `Failed to enqueue main-loop followup for ${sessionId}`, err?.message || String(err))
+    }
+  }, delayMs)
+}
+
 async function drainExecution(executionKey: string): Promise<void> {
   if (state.runningByExecution.has(executionKey)) return
   const q = queueForExecution(executionKey)
@@ -178,6 +200,21 @@ async function drainExecution(executionKey: string): Promise<void> {
     })
 
     const failed = !!result.error
+    let followup: MainLoopFollowupRequest | null = null
+    try {
+      followup = handleMainLoopRunResult({
+        sessionId: next.run.sessionId,
+        message: next.message,
+        internal: next.run.internal,
+        source: next.run.source,
+        resultText: result.text,
+        error: result.error,
+        toolEvents: result.toolEvents,
+      })
+    } catch (mainLoopErr: any) {
+      log.warn('session-run', `Main-loop update failed for ${next.run.id}`, mainLoopErr?.message || String(mainLoopErr))
+    }
+
     next.run.status = failed ? 'failed' : 'completed'
     next.run.endedAt = now()
     next.run.error = result.error
@@ -196,6 +233,13 @@ async function drainExecution(executionKey: string): Promise<void> {
       durationMs: (next.run.endedAt || now()) - (next.run.startedAt || now()),
     })
     next.resolve(result)
+    if (!failed && followup) {
+      scheduleMainLoopFollowup(next.run.sessionId, followup)
+      log.info('session-run', `Queued main-loop followup after ${next.run.id}`, {
+        sessionId: next.run.sessionId,
+        delayMs: followup.delayMs,
+      })
+    }
   } catch (err: any) {
     const aborted = next.signalController.signal.aborted
     next.run.status = aborted ? 'cancelled' : 'failed'
@@ -208,6 +252,19 @@ async function drainExecution(executionKey: string): Promise<void> {
       error: next.run.error,
       durationMs: (next.run.endedAt || now()) - (next.run.startedAt || now()),
     })
+    try {
+      handleMainLoopRunResult({
+        sessionId: next.run.sessionId,
+        message: next.message,
+        internal: next.run.internal,
+        source: next.run.source,
+        resultText: '',
+        error: next.run.error,
+        toolEvents: [],
+      })
+    } catch {
+      // Main-loop bookkeeping failures should not affect queue execution.
+    }
     next.reject(err instanceof Error ? err : new Error(next.run.error))
   } finally {
     if (runtimeTimer) clearTimeout(runtimeTimer)

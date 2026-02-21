@@ -64,6 +64,24 @@ export interface Session {
   tools?: string[]
   heartbeatEnabled?: boolean | null
   heartbeatIntervalSec?: number | null
+  mainLoopState?: {
+    goal?: string | null
+    status?: 'idle' | 'progress' | 'blocked' | 'ok'
+    summary?: string | null
+    nextAction?: string | null
+    paused?: boolean
+    autonomyMode?: 'assist' | 'autonomous'
+    pendingEvents?: Array<{
+      id: string
+      type: string
+      text: string
+      createdAt: number
+    }>
+    followupChainCount?: number
+    metaMissCount?: number
+    lastTickAt?: number | null
+    updatedAt?: number
+  }
   file?: string | null
   queuedCount?: number
   currentRunId?: string | null

@@ -241,7 +241,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       { internal: true },
     )
 
-    const trimmed = fullText.trim()
+    const trimmed = fullText
+      .split('\n')
+      .filter((line) => !line.includes('[MAIN_LOOP_META]'))
+      .join('\n')
+      .trim()
     if (!trimmed || trimmed === 'HEARTBEAT_OK' || sawError) return
 
     const assistantMsg: Message = {

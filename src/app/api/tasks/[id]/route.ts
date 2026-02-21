@@ -4,6 +4,7 @@ import { loadTasks, saveTasks } from '@/lib/server/storage'
 import { disableSessionHeartbeat, enqueueTask, validateCompletedTasksQueue } from '@/lib/server/queue'
 import { ensureTaskCompletionReport } from '@/lib/server/task-reports'
 import { formatValidationFailure, validateTaskCompletion } from '@/lib/server/task-validation'
+import { pushMainLoopEventToMainSessions } from '@/lib/server/main-agent-loop'
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   // Keep completed queue integrity even if daemon is not running.
@@ -62,6 +63,12 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   }
 
   saveTasks(tasks)
+  if (prevStatus !== tasks[id].status) {
+    pushMainLoopEventToMainSessions({
+      type: 'task_status_changed',
+      text: `Task "${tasks[id].title}" (${id}) moved ${prevStatus} → ${tasks[id].status}.`,
+    })
+  }
 
   // If task is manually transitioned to a terminal status, disable session heartbeat.
   if (prevStatus !== tasks[id].status && (tasks[id].status === 'completed' || tasks[id].status === 'failed')) {
@@ -86,6 +93,10 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   tasks[id].archivedAt = Date.now()
   tasks[id].updatedAt = Date.now()
   saveTasks(tasks)
+  pushMainLoopEventToMainSessions({
+    type: 'task_archived',
+    text: `Task archived: "${tasks[id].title}" (${id}).`,
+  })
 
   return NextResponse.json(tasks[id])
 }

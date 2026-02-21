@@ -15,6 +15,7 @@ import { log } from './logger'
 import { logExecution } from './execution-log'
 import { streamAgentChat } from './stream-agent-chat'
 import { buildSessionTools } from './session-tools'
+import { stripMainLoopMetaForPersistence } from './main-agent-loop'
 import type { MessageToolEvent, SSEEvent } from '@/types'
 
 const CLI_PROVIDER_IDS = new Set(['claude-cli', 'codex-cli', 'opencode-cli'])
@@ -389,7 +390,9 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
     if (signal) signal.removeEventListener('abort', abortFromOutside)
   }
 
-  const requestedToolNames = requestedToolNamesFromMessage(message)
+  const requestedToolNames = (!internal && source === 'chat')
+    ? requestedToolNamesFromMessage(message)
+    : []
   const calledNames = new Set((toolEvents || []).map((t) => t.name))
   if (requestedToolNames.includes('connector_message_tool')) {
     if (!calledNames.has('connector_message_tool')) {
@@ -469,8 +472,9 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
   }
 
   const finalText = (fullResponse || '').trim()
-  const shouldPersistAssistant = finalText.length > 0
-    && (!internal || finalText !== 'HEARTBEAT_OK')
+  const textForPersistence = stripMainLoopMetaForPersistence(finalText, internal)
+  const shouldPersistAssistant = textForPersistence.length > 0
+    && (!internal || textForPersistence !== 'HEARTBEAT_OK')
 
   const normalizeResumeId = (value: unknown): string | null =>
     typeof value === 'string' && value.trim() ? value.trim() : null
@@ -510,7 +514,7 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
     if (shouldPersistAssistant) {
       current.messages.push({
         role: 'assistant',
-        text: finalText,
+        text: textForPersistence,
         time: Date.now(),
         toolEvents: toolEvents.length ? toolEvents : undefined,
         kind: internal ? 'heartbeat' : 'chat',

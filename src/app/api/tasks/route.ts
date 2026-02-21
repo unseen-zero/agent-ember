@@ -4,6 +4,7 @@ import { loadTasks, saveTasks } from '@/lib/server/storage'
 import { validateCompletedTasksQueue } from '@/lib/server/queue'
 import { ensureTaskCompletionReport } from '@/lib/server/task-reports'
 import { formatValidationFailure, validateTaskCompletion } from '@/lib/server/task-validation'
+import { pushMainLoopEventToMainSessions } from '@/lib/server/main-agent-loop'
 
 export async function GET(req: Request) {
   // Keep completed queue integrity even if daemon is not running.
@@ -65,5 +66,9 @@ export async function POST(req: Request) {
   }
 
   saveTasks(tasks)
+  pushMainLoopEventToMainSessions({
+    type: 'task_created',
+    text: `Task created: "${tasks[id].title}" (${id}) with status ${tasks[id].status}.`,
+  })
   return NextResponse.json(tasks[id])
 }

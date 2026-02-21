@@ -3,11 +3,18 @@ import fs from 'fs'
 import { NextResponse } from 'next/server'
 import { getMemoryDb, getMemoryLookupLimits, storeMemoryImageAsset, storeMemoryImageFromDataUrl } from '@/lib/server/memory-db'
 import { resolveLookupRequest } from '@/lib/server/memory-graph'
+import type { MemoryReference, FileReference, MemoryImage } from '@/types'
 
 function parseOptionalInt(raw: string | null): number | undefined {
   if (!raw) return undefined
   const parsed = Number.parseInt(raw, 10)
   return Number.isFinite(parsed) ? parsed : undefined
+}
+
+async function parseJsonBody(req: Request): Promise<Record<string, unknown> | null> {
+  const body = await req.json().catch(() => null)
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  return body as Record<string, unknown>
 }
 
 export async function GET(req: Request) {
@@ -33,11 +40,12 @@ export async function GET(req: Request) {
       if (envelope) return NextResponse.json(result)
       return NextResponse.json(result.entries)
     }
-    const entries = db.search(q, agentId || undefined).slice(0, limits.maxPerLookup)
+    const base = db.search(q, agentId || undefined)
+    const entries = base.slice(0, limits.maxPerLookup)
     if (envelope) {
       return NextResponse.json({
         entries,
-        truncated: db.search(q, agentId || undefined).length > entries.length,
+        truncated: base.length > entries.length,
         expandedLinkedCount: 0,
         limits,
       })
@@ -58,7 +66,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const body = await req.json()
+  const body = await parseJsonBody(req)
+  if (!body) {
+    return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 })
+  }
+
   const db = getMemoryDb()
   const draftId = crypto.randomBytes(6).toString('hex')
 
@@ -83,17 +95,17 @@ export async function POST(req: Request) {
   }
 
   const entry = db.add({
-    agentId: body.agentId || null,
-    sessionId: body.sessionId || null,
-    category: body.category || 'note',
-    title: body.title || 'Untitled',
-    content: body.content || '',
-    metadata: body.metadata,
-    references: body.references,
-    filePaths: body.filePaths,
-    image,
-    imagePath: image?.path || body.imagePath || null,
-    linkedMemoryIds: body.linkedMemoryIds,
+    agentId: typeof body.agentId === 'string' ? body.agentId : null,
+    sessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
+    category: typeof body.category === 'string' && body.category.trim() ? body.category : 'note',
+    title: typeof body.title === 'string' && body.title.trim() ? body.title : 'Untitled',
+    content: typeof body.content === 'string' ? body.content : '',
+    metadata: body.metadata as Record<string, unknown> | undefined,
+    references: body.references as MemoryReference[] | undefined,
+    filePaths: body.filePaths as FileReference[] | undefined,
+    image: image as MemoryImage | null | undefined,
+    imagePath: image && typeof image === 'object' && 'path' in image ? String((image as { path: string }).path) : null,
+    linkedMemoryIds: body.linkedMemoryIds as string[] | undefined,
   })
   return NextResponse.json(entry)
 }

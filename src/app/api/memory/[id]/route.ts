@@ -3,11 +3,26 @@ import fs from 'fs'
 import { NextResponse } from 'next/server'
 import { getMemoryDb, getMemoryLookupLimits, storeMemoryImageAsset, storeMemoryImageFromDataUrl } from '@/lib/server/memory-db'
 import { resolveLookupRequest } from '@/lib/server/memory-graph'
+import type { MemoryImage } from '@/types'
 
 function parseOptionalInt(raw: string | null): number | undefined {
   if (!raw) return undefined
   const parsed = Number.parseInt(raw, 10)
   return Number.isFinite(parsed) ? parsed : undefined
+}
+
+async function parseJsonBody(req: Request): Promise<Record<string, unknown> | null> {
+  const body = await req.json().catch(() => null)
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  return body as Record<string, unknown>
+}
+
+function parseTargetIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -18,19 +33,27 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const requestedLimit = parseOptionalInt(searchParams.get('limit'))
   const requestedLinkedLimit = parseOptionalInt(searchParams.get('linkedLimit'))
   const db = getMemoryDb()
-
-  if (requestedDepth == null || requestedDepth <= 0) {
-    const entry = db.get(id)
-    if (!entry) return new NextResponse(null, { status: 404 })
-    return NextResponse.json(entry)
-  }
-
   const defaults = getMemoryLookupLimits()
   const limits = resolveLookupRequest(defaults, {
     depth: requestedDepth,
     limit: requestedLimit,
     linkedLimit: requestedLinkedLimit,
   })
+
+  if (limits.maxDepth <= 0) {
+    const entry = db.get(id)
+    if (!entry) return new NextResponse(null, { status: 404 })
+    if (envelope) {
+      return NextResponse.json({
+        entries: [entry],
+        truncated: false,
+        expandedLinkedCount: 0,
+        limits,
+      })
+    }
+    return NextResponse.json(entry)
+  }
+
   const result = db.getWithLinked(id, limits.maxDepth, limits.maxPerLookup, limits.maxLinkedExpansion)
   if (!result) return new NextResponse(null, { status: 404 })
   if (envelope) return NextResponse.json(result)
@@ -39,13 +62,33 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const body = await req.json()
+  const body = await parseJsonBody(req)
+  if (!body) {
+    return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 })
+  }
+
   const db = getMemoryDb()
+  const linkAction = typeof body.linkAction === 'string' ? body.linkAction.trim().toLowerCase() : ''
+
+  if (linkAction === 'link' || linkAction === 'unlink') {
+    const targetIds = parseTargetIds(body.targetIds)
+    if (!targetIds.length) {
+      return NextResponse.json({ error: 'targetIds is required for linkAction.' }, { status: 400 })
+    }
+    const updated = linkAction === 'link'
+      ? db.link(id, targetIds, true)
+      : db.unlink(id, targetIds, true)
+    if (!updated) return new NextResponse(null, { status: 404 })
+    return NextResponse.json(updated)
+  }
 
   let image = body.image
   const inputImagePath = typeof body.imagePath === 'string' ? body.imagePath.trim() : ''
   const inputImageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl.trim() : ''
-  if (inputImageDataUrl) {
+  const clearImage = body.clearImage === true || body.image === null
+  if (clearImage) {
+    image = null
+  } else if (inputImageDataUrl) {
     try {
       image = await storeMemoryImageFromDataUrl(inputImageDataUrl, `${id}-${crypto.randomBytes(2).toString('hex')}`)
     } catch (err) {
@@ -64,8 +107,12 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
   const entry = db.update(id, {
     ...body,
-    image,
-    imagePath: image?.path || body.imagePath,
+    image: image as MemoryImage | null | undefined,
+    imagePath: clearImage
+      ? null
+      : image && typeof image === 'object' && 'path' in image
+        ? String((image as { path: string }).path)
+        : (typeof body.imagePath === 'string' ? body.imagePath : undefined),
   })
   if (!entry) return new NextResponse(null, { status: 404 })
   return NextResponse.json(entry)

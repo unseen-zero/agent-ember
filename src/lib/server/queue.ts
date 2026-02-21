@@ -3,6 +3,7 @@ import { loadTasks, saveTasks, loadQueue, saveQueue, loadAgents, loadSessions, s
 import { createOrchestratorSession, executeOrchestrator } from './orchestrator'
 import { formatValidationFailure, validateTaskCompletion } from './task-validation'
 import { ensureTaskCompletionReport } from './task-reports'
+import { pushMainLoopEventToMainSessions } from './main-agent-loop'
 import type { BoardTask } from '@/types'
 
 let processing = false
@@ -44,6 +45,11 @@ export function enqueueTask(taskId: string) {
     queue.push(taskId)
     saveQueue(queue)
   }
+
+  pushMainLoopEventToMainSessions({
+    type: 'task_queued',
+    text: `Task queued: "${task.title}" (${task.id})`,
+  })
 
   // Delay before kicking worker so UI shows the queued state
   setTimeout(() => processNext(), 2000)
@@ -151,6 +157,10 @@ export async function processNext() {
         task.error = `Agent ${task.agentId} not found`
         task.updatedAt = Date.now()
         saveTasks(tasks)
+        pushMainLoopEventToMainSessions({
+          type: 'task_failed',
+          text: `Task failed: "${task.title}" (${task.id}) — agent not found.`,
+        })
         queue.shift()
         saveQueue(queue)
         continue
@@ -165,6 +175,10 @@ export async function processNext() {
       const sessionId = createOrchestratorSession(agent, task.title, undefined, taskCwd)
       task.sessionId = sessionId
       saveTasks(tasks)
+      pushMainLoopEventToMainSessions({
+        type: 'task_running',
+        text: `Task running: "${task.title}" (${task.id}) with ${agent.name}`,
+      })
 
       // Save initial assistant message so user sees context when opening the session
       const sessions = loadSessions()
@@ -223,8 +237,16 @@ export async function processNext() {
         }
         const doneTask = t2[taskId]
         if (doneTask?.status === 'completed') {
+          pushMainLoopEventToMainSessions({
+            type: 'task_completed',
+            text: `Task completed: "${task.title}" (${taskId})`,
+          })
           console.log(`[queue] Task "${task.title}" completed`)
         } else {
+          pushMainLoopEventToMainSessions({
+            type: 'task_failed',
+            text: `Task failed validation: "${task.title}" (${taskId})`,
+          })
           console.warn(`[queue] Task "${task.title}" failed completion validation`)
         }
       } catch (err: unknown) {
@@ -251,6 +273,10 @@ export async function processNext() {
           saveTasks(t2)
           disableSessionHeartbeat(t2[taskId].sessionId)
         }
+        pushMainLoopEventToMainSessions({
+          type: 'task_failed',
+          text: `Task failed: "${task.title}" (${taskId}) — ${errMsg.slice(0, 200)}`,
+        })
       }
 
       // Remove from queue

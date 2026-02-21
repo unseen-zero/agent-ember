@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import crypto from 'crypto'
 import os from 'os'
 import path from 'path'
-import { loadSessions, saveSessions, active } from '@/lib/server/storage'
+import { loadSessions, saveSessions, active, loadAgents } from '@/lib/server/storage'
 import { getSessionRunState } from '@/lib/server/session-run-manager'
 
 export async function GET() {
@@ -42,6 +42,10 @@ export async function POST(req: Request) {
 
   const id = body.id || crypto.randomBytes(4).toString('hex')
   const sessions = loadSessions()
+  const agent = body.agentId ? loadAgents()[body.agentId] : null
+  const requestedTools = Array.isArray(body.tools) ? body.tools : null
+  const resolvedTools = requestedTools ?? (Array.isArray(agent?.tools) ? agent.tools : [])
+
   // If session with this ID already exists, return it as-is
   if (body.id && sessions[id]) {
     return NextResponse.json(sessions[id])
@@ -49,10 +53,10 @@ export async function POST(req: Request) {
   sessions[id] = {
     id, name: body.name || 'New Session', cwd,
     user: body.user || 'wayde',
-    provider: body.provider || 'claude-cli',
-    model: body.model || '',
-    credentialId: body.credentialId || null,
-    apiEndpoint: body.apiEndpoint || null,
+    provider: body.provider || agent?.provider || 'claude-cli',
+    model: body.model || agent?.model || '',
+    credentialId: body.credentialId || agent?.credentialId || null,
+    apiEndpoint: body.apiEndpoint || agent?.apiEndpoint || null,
     claudeSessionId: null,
     codexThreadId: null,
     opencodeSessionId: null,
@@ -66,7 +70,7 @@ export async function POST(req: Request) {
     sessionType: body.sessionType || 'human',
     agentId: body.agentId || null,
     parentSessionId: body.parentSessionId || null,
-    tools: body.tools || [],
+    tools: resolvedTools,
     heartbeatEnabled: body.heartbeatEnabled ?? null,
     heartbeatIntervalSec: body.heartbeatIntervalSec ?? null,
   }

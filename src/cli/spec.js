@@ -189,6 +189,8 @@ const COMMAND_GROUPS = {
       delete: { description: 'Delete one session', method: 'DELETE', path: '/sessions/:id', params: ['id'] },
       'delete-many': { description: 'Delete multiple sessions (body: {"ids":[...]})', method: 'DELETE', path: '/sessions' },
       messages: { description: 'Get session message history', method: 'GET', path: '/sessions/:id/messages', params: ['id'] },
+      'main-loop': { description: 'Get main mission loop state for a session', method: 'GET', path: '/sessions/:id/main-loop', params: ['id'] },
+      'main-loop-action': { description: 'Control main mission loop (pause/resume/set_goal/set_mode/clear_events/nudge)', method: 'POST', path: '/sessions/:id/main-loop', params: ['id'] },
       chat: { description: 'Send chat message (SSE stream)', method: 'POST', path: '/sessions/:id/chat', params: ['id'], stream: true, waitable: true },
       stop: { description: 'Cancel active/running session work', method: 'POST', path: '/sessions/:id/stop', params: ['id'] },
       clear: { description: 'Clear session history', method: 'POST', path: '/sessions/:id/clear', params: ['id'] },

@@ -58,6 +58,7 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
   const modelName = session.model || agent?.model || ''
   const [copied, setCopied] = useState(false)
   const [heartbeatSaving, setHeartbeatSaving] = useState(false)
+  const [mainLoopSaving, setMainLoopSaving] = useState(false)
 
   // Find linked task for this session
   const linkedTask = useMemo(() => {
@@ -104,6 +105,12 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
   const loopIsOngoing = appSettings.loopMode === 'ongoing'
   const heartbeatIntervalRaw = session.heartbeatIntervalSec ?? appSettings.heartbeatIntervalSec ?? 120
   const heartbeatIntervalSec = Number.isFinite(Number(heartbeatIntervalRaw)) ? Math.max(0, Math.trunc(Number(heartbeatIntervalRaw))) : 120
+  const isMainSession = session.name === '__main__'
+  const missionState = session.mainLoopState || {}
+  const missionPaused = missionState.paused === true
+  const missionMode = missionState.autonomyMode === 'assist' ? 'assist' : 'autonomous'
+  const missionStatus = missionState.status || 'idle'
+  const missionEventsCount = missionState.pendingEvents?.length || 0
 
   const handleToggleHeartbeat = async () => {
     if (!heartbeatSupported || heartbeatSaving) return
@@ -129,6 +136,47 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
     } finally {
       setHeartbeatSaving(false)
     }
+  }
+
+  const postMainLoopAction = async (action: string, extra?: Record<string, unknown>) => {
+    if (!isMainSession || mainLoopSaving) return
+    setMainLoopSaving(true)
+    try {
+      await api('POST', `/sessions/${session.id}/main-loop`, {
+        action,
+        ...(extra || {}),
+      })
+      await loadSessions()
+    } finally {
+      setMainLoopSaving(false)
+    }
+  }
+
+  const handleToggleMissionPause = () => {
+    void postMainLoopAction(missionPaused ? 'resume' : 'pause')
+  }
+
+  const handleToggleMissionMode = () => {
+    const nextMode = missionMode === 'autonomous' ? 'assist' : 'autonomous'
+    void postMainLoopAction('set_mode', { mode: nextMode })
+  }
+
+  const handleNudgeMission = () => {
+    void postMainLoopAction('nudge')
+  }
+
+  const handleSetMissionGoal = () => {
+    if (!isMainSession) return
+    const seededGoal = typeof missionState.goal === 'string' ? missionState.goal : ''
+    const raw = window.prompt('Set mission goal', seededGoal)
+    const goal = (raw || '').trim()
+    if (!goal) return
+    void postMainLoopAction('set_goal', { goal })
+  }
+
+  const handleClearMissionEvents = () => {
+    if (!isMainSession || missionEventsCount <= 0) return
+    void postMainLoopAction('clear_events')
   }
 
   useEffect(() => {
@@ -232,7 +280,7 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
       </div>
 
       {/* Sub-bar: tools toggle + agent memories + task link + CLI session ID + browser */}
-      {(agent || linkedTask || resumeHandle || browserActive || session.tools?.length) && (
+      {(agent || linkedTask || resumeHandle || browserActive || session.tools?.length || isMainSession) && (
         <div className="flex items-center gap-3 px-5 pb-2.5 -mt-1">
           {(((agent?.tools?.length ?? 0) > 0) || ((session.tools?.length ?? 0) > 0)) && (
             <ChatToolToggles session={session} />
@@ -264,6 +312,61 @@ export function ChatHeader({ session, streaming, onStop, onMenuToggle, onBack, m
                   <span className="text-[11px] font-600">HB {heartbeatIntervalSec}s</span>
                 </button>
               )}
+            </>
+          )}
+          {isMainSession && (
+            <>
+              <button
+                onClick={handleToggleMissionPause}
+                disabled={mainLoopSaving}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] transition-colors cursor-pointer border-none
+                  ${missionPaused ? 'bg-amber-500/12 hover:bg-amber-500/20 text-amber-300' : 'bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-400'}`}
+                title={missionPaused ? 'Resume autonomous mission loop' : 'Pause autonomous mission loop'}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${missionPaused ? 'bg-amber-300' : 'bg-emerald-400'}`} />
+                <span className="text-[11px] font-600">
+                  Mission {missionPaused ? 'Paused' : 'Live'}
+                </span>
+              </button>
+              <button
+                onClick={handleToggleMissionMode}
+                disabled={mainLoopSaving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-white/[0.04] hover:bg-white/[0.07] text-text-3 transition-colors cursor-pointer border-none"
+                title="Toggle mission autonomy mode"
+              >
+                <span className="text-[11px] font-600">
+                  Mode {missionMode === 'autonomous' ? 'Auto' : 'Assist'}
+                </span>
+              </button>
+              <button
+                onClick={handleNudgeMission}
+                disabled={mainLoopSaving || missionPaused}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-[#3B82F6]/10 hover:bg-[#3B82F6]/18 text-[#60A5FA] transition-colors cursor-pointer border-none disabled:opacity-60"
+                title="Run one immediate main-loop mission tick"
+              >
+                <span className="text-[11px] font-600">Nudge</span>
+              </button>
+              <button
+                onClick={handleSetMissionGoal}
+                disabled={mainLoopSaving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-fuchsia-500/10 hover:bg-fuchsia-500/18 text-fuchsia-300 transition-colors cursor-pointer border-none"
+                title="Set an explicit mission goal"
+              >
+                <span className="text-[11px] font-600">Set Goal</span>
+              </button>
+              {missionEventsCount > 0 && (
+                <button
+                  onClick={handleClearMissionEvents}
+                  disabled={mainLoopSaving}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-white/[0.04] hover:bg-white/[0.07] text-text-3 transition-colors cursor-pointer border-none"
+                  title="Clear pending mission events"
+                >
+                  <span className="text-[11px] font-600">Events {missionEventsCount}</span>
+                </button>
+              )}
+              <span className="text-[10px] text-text-3/50 uppercase tracking-wider">
+                {`State ${missionStatus}`}
+              </span>
             </>
           )}
           {agent && session.tools?.includes('memory') && (

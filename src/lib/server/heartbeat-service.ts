@@ -1,6 +1,7 @@
 import { loadAgents, loadSessions, loadSettings } from './storage'
 import { enqueueSessionRun, getSessionRunState } from './session-run-manager'
 import { log } from './logger'
+import { buildMainLoopHeartbeatPrompt, getMainLoopStateForSession, isMainSession } from './main-agent-loop'
 
 const HEARTBEAT_TICK_MS = 5_000
 
@@ -159,6 +160,10 @@ async function tickHeartbeats() {
 
     const cfg = heartbeatConfigForSession(session, settings, agents)
     if (!cfg.enabled) continue
+    if (isMainSession(session)) {
+      const loopState = getMainLoopStateForSession(session.id)
+      if (loopState?.paused) continue
+    }
 
     const last = state.lastBySession.get(session.id) || 0
     if (now - last < cfg.intervalSec * 1000) continue
@@ -167,9 +172,13 @@ async function tickHeartbeats() {
     if (runState.runningRunId) continue
 
     state.lastBySession.set(session.id, now)
+    const heartbeatMessage = isMainSession(session)
+      ? buildMainLoopHeartbeatPrompt(session, cfg.prompt)
+      : cfg.prompt
+
     const enqueue = enqueueSessionRun({
       sessionId: session.id,
-      message: cfg.prompt,
+      message: heartbeatMessage,
       internal: true,
       source: 'heartbeat',
       mode: 'collect',
