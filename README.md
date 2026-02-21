@@ -241,6 +241,21 @@ The daemon auto-processes queued tasks from the scheduler on a 30-second interva
 - **API:** `GET /api/daemon` (status), `POST /api/daemon` with `{"action": "start"}` or `{"action": "stop"}`
 - Auto-starts on boot if queued tasks are found
 
+## Main Agent Loop
+
+For autonomous long-running missions, enable the **Main Loop** on a session. This lets an agent pursue a goal continuously with heartbeat-driven progress checks and automatic followups.
+
+- **Heartbeat prompts:** `SWARM_MAIN_MISSION_TICK` triggers on each heartbeat, giving the agent its goal, status, and pending events
+- **Auto-followup:** When an agent returns `[MAIN_LOOP_META] {"follow_up":true}`, the loop schedules another tick after `delay_sec`
+- **Mission state:** Tracks `goal`, `status` (idle/progress/blocked/ok), `summary`, `nextAction`, `autonomyMode` (assist/autonomous), and pending events
+- **Autonomy modes:**
+  - `autonomous`: Agent executes safe actions without confirmation, only asks when blocked by permissions/credentials
+  - `assist`: Agent asks before irreversible external actions (sending messages, purchases, account mutations)
+- **API:** `POST /api/sessions/[id]/main-loop` with `{"tick":true}` to trigger a mission tick
+- **CLI:** `swarmclaw sessions main-loop --session-id <id>` (via daemon schedule)
+
+Use this for background agents that should "keep working" on a goal until blocked or complete.
+
 ## Loop Modes
 
 Configure loop behavior in **Settings → Runtime & Loop Controls**:
