@@ -16,6 +16,8 @@ import { logExecution } from './execution-log'
 import { streamAgentChat } from './stream-agent-chat'
 import { buildSessionTools } from './session-tools'
 import { stripMainLoopMetaForPersistence } from './main-agent-loop'
+import { normalizeProviderEndpoint } from '@/lib/openclaw-endpoint'
+import { getMemoryDb } from './memory-db'
 import type { MessageToolEvent, SSEEvent } from '@/types'
 
 const CLI_PROVIDER_IDS = new Set(['claude-cli', 'codex-cli', 'opencode-cli'])
@@ -215,7 +217,10 @@ function syncSessionFromAgent(sessionId: string): void {
   if (agent.provider && agent.provider !== session.provider) { session.provider = agent.provider; changed = true }
   if (agent.model !== undefined && agent.model !== session.model) { session.model = agent.model; changed = true }
   if (agent.credentialId !== undefined && agent.credentialId !== session.credentialId) { session.credentialId = agent.credentialId ?? null; changed = true }
-  if (agent.apiEndpoint !== undefined && agent.apiEndpoint !== session.apiEndpoint) { session.apiEndpoint = agent.apiEndpoint ?? null; changed = true }
+  if (agent.apiEndpoint !== undefined) {
+    const normalized = normalizeProviderEndpoint(agent.provider, agent.apiEndpoint ?? null)
+    if (normalized !== session.apiEndpoint) { session.apiEndpoint = normalized; changed = true }
+  }
   if (!Array.isArray(session.tools)) {
     session.tools = Array.isArray(agent.tools) ? [...agent.tools] : []
     changed = true
@@ -264,6 +269,63 @@ function resolveApiKeyForSession(session: any, provider: any): string | null {
     }
   }
   return null
+}
+
+const AUTO_MEMORY_MIN_INTERVAL_MS = 10 * 60 * 1000
+
+function shouldStoreAutoMemoryNote(opts: {
+  session: any
+  source: string
+  internal: boolean
+  message: string
+  response: string
+  now: number
+}): boolean {
+  const { session, source, internal, message, response, now } = opts
+  if (internal) return false
+  if (source !== 'chat' && source !== 'connector') return false
+  if (!session?.agentId) return false
+  if (!Array.isArray(session.tools) || !session.tools.includes('memory')) return false
+  const msg = (message || '').trim()
+  const resp = (response || '').trim()
+  if (msg.length < 20 || resp.length < 40) return false
+  if (/^(ok|okay|cool|thanks|thx|got it|nice)[.! ]*$/i.test(msg)) return false
+  if (resp === 'HEARTBEAT_OK') return false
+  const last = typeof session.lastAutoMemoryAt === 'number' ? session.lastAutoMemoryAt : 0
+  if (last > 0 && now - last < AUTO_MEMORY_MIN_INTERVAL_MS) return false
+  return true
+}
+
+function storeAutoMemoryNote(opts: {
+  session: any
+  message: string
+  response: string
+  source: string
+  now: number
+}): string | null {
+  const { session, message, response, source, now } = opts
+  try {
+    const db = getMemoryDb()
+    const compactMessage = message.replace(/\s+/g, ' ').trim().slice(0, 220)
+    const compactResponse = response.replace(/\s+/g, ' ').trim().slice(0, 700)
+    const title = `[auto] ${compactMessage.slice(0, 90)}`
+    const content = [
+      `source: ${source}`,
+      `user_request: ${compactMessage}`,
+      `assistant_outcome: ${compactResponse}`,
+    ].join('\n')
+    const created = db.add({
+      agentId: session.agentId,
+      sessionId: session.id,
+      category: 'execution',
+      title,
+      content,
+    } as any)
+    session.lastAutoMemoryAt = now
+    return created?.id || null
+  } catch {
+    return null
+  }
 }
 
 export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promise<ExecuteChatTurnResult> {
@@ -520,6 +582,25 @@ export async function executeSessionChatTurn(input: ExecuteChatTurnInput): Promi
         kind: internal ? 'heartbeat' : 'chat',
       })
       changed = true
+    }
+
+    const autoMemoryEligible = shouldStoreAutoMemoryNote({
+      session: current,
+      source,
+      internal,
+      message,
+      response: textForPersistence,
+      now: Date.now(),
+    })
+    if (autoMemoryEligible) {
+      const storedId = storeAutoMemoryNote({
+        session: current,
+        message,
+        response: textForPersistence,
+        source,
+        now: Date.now(),
+      })
+      if (storedId) changed = true
     }
 
     // Always update lastActiveAt after a successful run (including heartbeats),

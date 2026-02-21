@@ -31,7 +31,7 @@ interface QueueEntry {
   message: string
   imagePath?: string
   imageUrl?: string
-  onEvent?: (event: SSEEvent) => void
+  onEvents: Array<(event: SSEEvent) => void>
   signalController: AbortController
   maxRuntimeMs?: number
   resolve: (value: ExecuteChatTurnResult) => void
@@ -48,6 +48,7 @@ interface RuntimeState {
 }
 
 const MAX_RECENT_RUNS = 500
+const COLLECT_COALESCE_WINDOW_MS = 1500
 const globalKey = '__swarmclaw_session_run_manager__' as const
 const state: RuntimeState = (globalThis as any)[globalKey] ?? ((globalThis as any)[globalKey] = {
   runningByExecution: new Map<string, QueueEntry>(),
@@ -80,24 +81,30 @@ function registerRun(run: SessionRunRecord) {
   trimRecentRuns()
 }
 
-function emitRunMeta(entry: QueueEntry, status: SessionRunStatus, extra?: Record<string, unknown>) {
-  try {
-    entry.onEvent?.({
-      t: 'md',
-      text: JSON.stringify({
-        run: {
-          id: entry.run.id,
-          sessionId: entry.run.sessionId,
-          status,
-          source: entry.run.source,
-          internal: entry.run.internal,
-          ...extra,
-        },
-      }),
-    })
-  } catch {
-    // Stream may already be closed on the consumer side.
+function emitToSubscribers(entry: QueueEntry, event: SSEEvent) {
+  for (const send of entry.onEvents) {
+    try {
+      send(event)
+    } catch {
+      // Subscriber stream can be closed by the client.
+    }
   }
+}
+
+function emitRunMeta(entry: QueueEntry, status: SessionRunStatus, extra?: Record<string, unknown>) {
+  emitToSubscribers(entry, {
+    t: 'md',
+    text: JSON.stringify({
+      run: {
+        id: entry.run.id,
+        sessionId: entry.run.sessionId,
+        status,
+        source: entry.run.source,
+        internal: entry.run.internal,
+        ...extra,
+      },
+    }),
+  })
 }
 
 function executionKeyForSession(sessionId: string): string {
@@ -196,7 +203,7 @@ async function drainExecution(executionKey: string): Promise<void> {
       source: next.run.source,
       runId: next.run.id,
       signal: next.signalController.signal,
-      onEvent: next.onEvent,
+      onEvent: (event) => emitToSubscribers(next, event),
     })
 
     const failed = !!result.error
@@ -299,12 +306,14 @@ export interface EnqueueSessionRunResult {
   runId: string
   position: number
   deduped?: boolean
+  coalesced?: boolean
   promise: Promise<ExecuteChatTurnResult>
 }
 
 export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSessionRunResult {
   const internal = input.internal === true
   const mode = normalizeMode(input.mode, internal)
+  const source = input.source || 'chat'
   const executionKey = executionKeyForSession(input.sessionId)
   const runtime = loadRuntimeSettings()
   const defaultMaxRuntimeMs = runtime.ongoingLoopMaxRuntimeMs ?? (10 * 60_000)
@@ -314,6 +323,7 @@ export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSession
 
   const dedupe = findDedupeMatch(input.sessionId, input.dedupeKey)
   if (dedupe) {
+    if (input.onEvent) dedupe.onEvents.push(input.onEvent)
     return {
       runId: dedupe.run.id,
       position: 0,
@@ -331,11 +341,45 @@ export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSession
     cancelPendingForSession(input.sessionId, 'Cancelled by steer mode')
   }
 
+  const running = state.runningByExecution.get(executionKey)
+  const q = queueForExecution(executionKey)
+  if (mode === 'collect' && !input.imagePath && !input.imageUrl) {
+    const nowMs = now()
+    const candidate = q.at(-1)
+    const canCoalesce = !!candidate
+      && candidate.run.mode === 'collect'
+      && candidate.run.internal === internal
+      && candidate.run.source === source
+      && !candidate.imagePath
+      && !candidate.imageUrl
+      && (nowMs - candidate.run.queuedAt) <= COLLECT_COALESCE_WINDOW_MS
+
+    if (candidate && canCoalesce) {
+      const nextChunk = input.message.trim()
+      if (nextChunk) {
+        const current = candidate.message.trim()
+        candidate.message = current
+          ? `${current}\n\n[Collected follow-up]\n${nextChunk}`
+          : nextChunk
+        candidate.run.messagePreview = messagePreview(candidate.message)
+        candidate.run.queuedAt = nowMs
+      }
+      if (input.onEvent) candidate.onEvents.push(input.onEvent)
+      emitRunMeta(candidate, 'queued', { position: 0, coalesced: true, mergedIntoRunId: candidate.run.id })
+      return {
+        runId: candidate.run.id,
+        position: 0,
+        coalesced: true,
+        promise: candidate.promise,
+      }
+    }
+  }
+
   const runId = crypto.randomBytes(8).toString('hex')
   const run: SessionRunRecord = {
     id: runId,
     sessionId: input.sessionId,
-    source: input.source || 'chat',
+    source,
     internal,
     mode,
     status: 'queued',
@@ -359,7 +403,7 @@ export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSession
     message: input.message,
     imagePath: input.imagePath,
     imageUrl: input.imageUrl,
-    onEvent: input.onEvent,
+    onEvents: input.onEvent ? [input.onEvent] : [],
     signalController: new AbortController(),
     maxRuntimeMs: effectiveMaxRuntimeMs > 0 ? effectiveMaxRuntimeMs : undefined,
     resolve,
@@ -367,8 +411,6 @@ export function enqueueSessionRun(input: EnqueueSessionRunInput): EnqueueSession
     promise,
   }
 
-  const running = state.runningByExecution.get(executionKey)
-  const q = queueForExecution(executionKey)
   q.push(entry)
   const position = (running ? 1 : 0) + q.length - 1
   emitRunMeta(entry, 'queued', { position })

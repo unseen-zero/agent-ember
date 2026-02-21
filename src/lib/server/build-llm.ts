@@ -2,6 +2,7 @@ import { ChatAnthropic } from '@langchain/anthropic'
 import { ChatOpenAI } from '@langchain/openai'
 import { loadCredentials, decryptKey, loadAgents, loadSettings } from './storage'
 import { getProviderList } from '../providers'
+import { normalizeOpenClawEndpoint } from '../openclaw-endpoint'
 
 const OLLAMA_CLOUD_URL = 'https://ollama.com/v1'
 const OLLAMA_LOCAL_URL = 'http://localhost:11434/v1'
@@ -21,7 +22,10 @@ export function buildChatModel(opts: {
   const { provider, model, apiKey, apiEndpoint } = opts
   const providers = getProviderList()
   const providerInfo = providers.find((p) => p.id === provider)
-  const endpoint = apiEndpoint || providerInfo?.defaultEndpoint || null
+  const endpointRaw = apiEndpoint || providerInfo?.defaultEndpoint || null
+  const endpoint = provider === 'openclaw'
+    ? normalizeOpenClawEndpoint(endpointRaw)
+    : endpointRaw
 
   if (provider === 'anthropic') {
     return new ChatAnthropic({

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { loadAgents, saveAgents } from '@/lib/server/storage'
+import { normalizeProviderEndpoint } from '@/lib/openclaw-endpoint'
 
 export async function GET() {
   return NextResponse.json(loadAgents())
@@ -19,7 +20,7 @@ export async function POST(req: Request) {
     provider: body.provider || 'claude-cli',
     model: body.model || '',
     credentialId: body.credentialId || null,
-    apiEndpoint: body.apiEndpoint || null,
+    apiEndpoint: normalizeProviderEndpoint(body.provider || 'claude-cli', body.apiEndpoint || null),
     isOrchestrator: body.isOrchestrator || false,
     subAgentIds: body.subAgentIds || [],
     tools: body.tools || [],

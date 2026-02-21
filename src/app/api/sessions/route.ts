@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { loadSessions, saveSessions, active, loadAgents } from '@/lib/server/storage'
 import { getSessionRunState } from '@/lib/server/session-run-manager'
+import { normalizeProviderEndpoint } from '@/lib/openclaw-endpoint'
 
 export async function GET() {
   const sessions = loadSessions()
@@ -56,7 +57,10 @@ export async function POST(req: Request) {
     provider: body.provider || agent?.provider || 'claude-cli',
     model: body.model || agent?.model || '',
     credentialId: body.credentialId || agent?.credentialId || null,
-    apiEndpoint: body.apiEndpoint || agent?.apiEndpoint || null,
+    apiEndpoint: normalizeProviderEndpoint(
+      body.provider || agent?.provider || 'claude-cli',
+      body.apiEndpoint || agent?.apiEndpoint || null,
+    ),
     claudeSessionId: null,
     codexThreadId: null,
     opencodeSessionId: null,

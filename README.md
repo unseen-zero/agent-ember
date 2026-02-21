@@ -21,7 +21,7 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 ## Features
 
 - **15 Built-in Providers** — Claude Code CLI, OpenAI Codex CLI, OpenCode CLI, Anthropic, OpenAI, Google Gemini, DeepSeek, Groq, Together AI, Mistral AI, xAI (Grok), Fireworks AI, Ollama, OpenClaw, plus custom OpenAI-compatible endpoints
-- **OpenClaw Integration** — Connect to remote [OpenClaw](https://github.com/openclaw/openclaw) instances as providers. Control a swarm of autonomous AI agents from a single dashboard
+- **OpenClaw Integration** — First-tier OpenClaw support with endpoint normalization (`ws://`, root HTTP, `/v1`), live health checks, and provider-level diagnostics
 - **Agent Builder** — Create agents with custom personalities (soul), system prompts, tools, and skills. AI-powered generation from a description
 - **Agent Tools** — Shell, process control for long-running commands, files, edit file, send file, web search, web fetch, CLI delegation (Claude/Codex/OpenCode), Playwright browser automation, and persistent memory
 - **Platform Tools** — Agents can manage other agents, tasks, schedules, skills, connectors, sessions, and encrypted secrets via built-in platform tools
@@ -31,13 +31,13 @@ SwarmClaw can spawn **Claude Code CLI** processes with full shell access on your
 - **Background Daemon** — Auto-processes queued tasks and scheduled jobs with a 30s heartbeat plus recurring health monitoring
 - **Scheduling** — Cron-based agent scheduling with human-friendly presets
 - **Loop Runtime Controls** — Switch between bounded and ongoing loops with configurable step caps, runtime guards, heartbeat cadence, and timeout budgets
-- **Session Run Queue** — Per-session queued runs with followup/steer/collect modes and run-state APIs
+- **Session Run Queue** — Per-session queued runs with followup/steer/collect modes, collect coalescing for bursty inputs, and run-state APIs
 - **Voice Settings** — Per-instance ElevenLabs API key + voice ID for TTS replies, plus configurable speech recognition language for chat input
 - **Chat Connectors** — Bridge agents to Discord, Slack, Telegram, and WhatsApp with media-aware inbound handling
 - **Skills System** — Discover local skills, import skills from URL, and load OpenClaw `SKILL.md` files (frontmatter-compatible)
 - **Execution Logging** — Structured audit trail for triggers, tool calls, file ops, commits, and errors in a dedicated `logs.db`
 - **Context Management** — Auto-compaction of conversation history when approaching context limits, with manual `context_status` and `context_summarize` tools for agents
-- **Memory** — Per-agent and per-session memory with hybrid FTS5 + vector embeddings search. Supports file references, image attachments, and linked memories with BFS graph traversal. Platform knowledge auto-seeded on fresh installs
+- **Memory** — Per-agent and per-session memory with hybrid FTS5 + vector embeddings search, relevance-based memory recall injected into runs, and periodic auto-journaling for durable execution context
 - **Cost Tracking** — Per-message token counting and cost estimation displayed in the chat header
 - **Model Failover** — Automatic key rotation on rate limits and auth errors with configurable fallback credentials
 - **Plugin System** — Extend agent behavior with JS plugins (hooks: beforeAgentStart, afterAgentComplete, beforeToolExec, afterToolExec, onMessage)
@@ -162,6 +162,17 @@ To connect an OpenClaw instance:
 4. Optionally add a Bearer token if your OpenClaw instance requires authentication
 
 Each agent can point to a different OpenClaw instance — this is how you manage a **swarm of OpenClaws** from a single dashboard.
+
+SwarmClaw normalizes common endpoint forms automatically:
+- `ws://host:18789` → `http://host:18789/v1`
+- `http://host:18789` → `http://host:18789/v1`
+- `http://host:18789/v1/chat/completions` → `http://host:18789/v1`
+
+Validate connectivity/auth with:
+
+```bash
+swarmclaw providers openclaw-health --query endpoint=ws://127.0.0.1:18789 --query credentialId=cred_openclaw
+```
 
 ## Chat Connectors
 
@@ -422,7 +433,7 @@ swarmclaw [global-options] <group> <command> [command-options]
 | `claude-skills` | `list`, `get` |
 | `connectors` | `list`, `get`, `create`, `update`, `delete`, `start`, `stop` |
 | `credentials` | `list`, `get`, `create`, `update`, `delete` |
-| `daemon` | `status`, `start`, `stop` |
+| `daemon` | `status`, `start`, `stop`, `health-check` |
 | `dirs` | `list` |
 | `documents` | `list`, `upload`, `search`, `get`, `delete` |
 | `generate` | `agent`, `skill` |
@@ -431,7 +442,7 @@ swarmclaw [global-options] <group> <command> [command-options]
 | `memory` | `list`, `store`, `get`, `search`, `delete` |
 | `orchestrator` | `status` |
 | `plugins` | `list`, `get`, `create`, `update`, `delete`, `install` |
-| `providers` | `list`, `get`, `create`, `update`, `delete` |
+| `providers` | `list`, `get`, `create`, `update`, `delete`, `openclaw-health`, `models`, `models-set`, `models-clear` |
 | `runs` | `list`, `get` |
 | `schedules` | `list`, `get`, `create`, `update`, `delete` |
 | `secrets` | `list`, `get`, `create`, `update`, `delete` |
@@ -484,6 +495,10 @@ swarmclaw secrets create --key "API_KEY" --value "secret123"
 swarmclaw daemon status
 swarmclaw daemon start
 swarmclaw daemon stop
+swarmclaw daemon health-check
+
+# openclaw endpoint probe
+swarmclaw providers openclaw-health --query endpoint=ws://127.0.0.1:18789 --query credentialId=cred_openclaw
 
 # create and list webhooks
 swarmclaw webhooks create --name "GitHub Push" --source "github" --agent-id <agentId> --events push --secret "webhook-secret"

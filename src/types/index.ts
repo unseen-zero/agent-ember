@@ -64,6 +64,7 @@ export interface Session {
   tools?: string[]
   heartbeatEnabled?: boolean | null
   heartbeatIntervalSec?: number | null
+  lastAutoMemoryAt?: number | null
   mainLoopState?: {
     goal?: string | null
     status?: 'idle' | 'progress' | 'blocked' | 'ok'

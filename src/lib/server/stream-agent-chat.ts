@@ -201,18 +201,64 @@ export async function streamAgentChat(opts: StreamAgentChatOpts): Promise<Stream
   if ((session.tools || []).includes('memory') && session.agentId) {
     try {
       const memDb = getMemoryDb()
-      const recent = memDb
-        .list(session.agentId)
-        .slice(-8)
-        .map((m) => `- [${m.category}] ${m.title}: ${m.content.slice(0, 200)}`)
-      if (recent.length > 0) {
-        stateModifierParts.push(
+      const memoryQuerySeed = [
+        message,
+        ...history
+          .slice(-4)
+          .filter((h) => h.role === 'user')
+          .map((h) => h.text),
+      ].join('\n')
+
+      const relevantLookup = memDb.searchWithLinked(memoryQuerySeed, session.agentId, 1, 10, 14)
+      const relevant = relevantLookup.entries.slice(0, 6)
+      const recent = memDb.list(session.agentId, 12).slice(0, 6)
+
+      const seen = new Set<string>()
+      const formatMemoryLine = (m: any) => {
+        const category = String(m.category || 'note')
+        const title = String(m.title || 'Untitled').replace(/\s+/g, ' ').trim()
+        const snippet = String(m.content || '').replace(/\s+/g, ' ').trim().slice(0, 220)
+        return `- [${category}] ${title}: ${snippet}`
+      }
+
+      const relevantLines = relevant
+        .filter((m) => {
+          if (!m?.id || seen.has(m.id)) return false
+          seen.add(m.id)
+          return true
+        })
+        .map(formatMemoryLine)
+
+      const recentLines = recent
+        .filter((m) => {
+          if (!m?.id || seen.has(m.id)) return false
+          seen.add(m.id)
+          return true
+        })
+        .map(formatMemoryLine)
+
+      const memorySections: string[] = []
+      if (relevantLines.length) {
+        memorySections.push(
           [
-            '## Recent Memory Context',
-            'Use these as prior context when relevant, then verify/update with memory_tool as needed.',
-            ...recent,
+            '## Relevant Memory Hits',
+            'These memories were retrieved by relevance for the current objective.',
+            ...relevantLines,
           ].join('\n'),
         )
+      }
+      if (recentLines.length) {
+        memorySections.push(
+          [
+            '## Recent Memory Notes',
+            'Recent durable notes that may still apply.',
+            ...recentLines,
+          ].join('\n'),
+        )
+      }
+
+      if (memorySections.length) {
+        stateModifierParts.push(memorySections.join('\n\n'))
       }
     } catch {
       // If memory context fails to load, continue without blocking the run.

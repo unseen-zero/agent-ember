@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { loadSessions, saveSessions, active } from '@/lib/server/storage'
+import { normalizeProviderEndpoint } from '@/lib/openclaw-endpoint'
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -8,6 +9,15 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   if (!sessions[id]) return new NextResponse(null, { status: 404 })
   if (updates.name !== undefined) sessions[id].name = updates.name
   if (updates.cwd !== undefined) sessions[id].cwd = updates.cwd
+  if (updates.provider !== undefined) sessions[id].provider = updates.provider
+  if (updates.model !== undefined) sessions[id].model = updates.model
+  if (updates.credentialId !== undefined) sessions[id].credentialId = updates.credentialId
+  if (updates.apiEndpoint !== undefined) {
+    sessions[id].apiEndpoint = normalizeProviderEndpoint(
+      updates.provider || sessions[id].provider,
+      updates.apiEndpoint,
+    )
+  }
   if (updates.agentId !== undefined) sessions[id].agentId = updates.agentId
   if (updates.tools !== undefined) sessions[id].tools = updates.tools
   if (updates.heartbeatEnabled !== undefined) sessions[id].heartbeatEnabled = updates.heartbeatEnabled

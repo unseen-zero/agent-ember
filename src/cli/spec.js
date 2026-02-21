@@ -154,6 +154,7 @@ const COMMAND_GROUPS = {
       delete: { description: 'Delete custom provider', method: 'DELETE', path: '/providers/:id', params: ['id'] },
       configs: { description: 'List provider configs only', method: 'GET', path: '/providers/configs' },
       ollama: { description: 'List local Ollama models', method: 'GET', path: '/providers/ollama' },
+      'openclaw-health': { description: 'Probe OpenClaw endpoint and auth status', method: 'GET', path: '/providers/openclaw/health' },
       'models-get': { description: 'Get provider model overrides', method: 'GET', path: '/providers/:id/models', params: ['id'] },
       'models-set': { description: 'Set provider model overrides', method: 'PUT', path: '/providers/:id/models', params: ['id'] },
       'models-reset': { description: 'Delete provider model overrides', method: 'DELETE', path: '/providers/:id/models', params: ['id'] },
@@ -218,6 +219,13 @@ const COMMAND_GROUPS = {
       delete: { description: 'Delete SwarmClaw skill', method: 'DELETE', path: '/skills/:id', params: ['id'] },
       import: { description: 'Import skill from URL', method: 'POST', path: '/skills/import' },
       claude: { description: 'List local ~/.claude/skills', method: 'GET', path: '/claude-skills' },
+    },
+  },
+  stripe: {
+    description: 'Stripe billing endpoints',
+    commands: {
+      checkout: { description: 'Create Stripe checkout session', method: 'POST', path: '/stripe/checkout' },
+      webhook: { description: 'Send Stripe webhook payload', method: 'POST', path: '/stripe/webhook' },
     },
   },
   system: {

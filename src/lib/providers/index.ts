@@ -5,6 +5,7 @@ import { streamOpenAiChat } from './openai'
 import { streamOllamaChat } from './ollama'
 import { streamAnthropicChat } from './anthropic'
 import type { ProviderInfo, ProviderConfig as CustomProviderConfig } from '../../types'
+import { normalizeOpenClawEndpoint } from '../openclaw-endpoint'
 
 const RETRYABLE_STATUS_CODES = [401, 429, 500, 502, 503]
 
@@ -72,7 +73,7 @@ const PROVIDERS: Record<string, BuiltinProviderConfig> = {
       streamChat: (opts) => {
         const patchedSession = {
           ...opts.session,
-          apiEndpoint: opts.session.apiEndpoint || 'http://localhost:18789/v1',
+          apiEndpoint: normalizeOpenClawEndpoint(opts.session.apiEndpoint || 'http://localhost:18789/v1'),
         }
         return streamOpenAiChat({ ...opts, session: patchedSession })
       },

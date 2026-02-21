@@ -185,6 +185,7 @@ const COMMAND_GROUPS = [
       cmd('delete', 'DELETE', '/providers/:id', 'Delete provider'),
       cmd('configs', 'GET', '/providers/configs', 'List saved provider configs'),
       cmd('ollama', 'GET', '/providers/ollama', 'List local Ollama models (use --query endpoint=http://localhost:11434)'),
+      cmd('openclaw-health', 'GET', '/providers/openclaw/health', 'Probe OpenClaw endpoint/auth (use --query endpoint= --query credentialId= --query model=)'),
       cmd('models', 'GET', '/providers/:id/models', 'Get provider model overrides'),
       cmd('models-set', 'PUT', '/providers/:id/models', 'Set provider model overrides', { expectsJsonBody: true }),
       cmd('models-clear', 'DELETE', '/providers/:id/models', 'Clear provider model overrides'),
@@ -278,6 +279,14 @@ const COMMAND_GROUPS = [
       cmd('update', 'PUT', '/skills/:id', 'Update skill', { expectsJsonBody: true }),
       cmd('delete', 'DELETE', '/skills/:id', 'Delete skill'),
       cmd('import', 'POST', '/skills/import', 'Import skill from URL', { expectsJsonBody: true }),
+    ],
+  },
+  {
+    name: 'stripe',
+    description: 'Stripe billing endpoints',
+    commands: [
+      cmd('checkout', 'POST', '/stripe/checkout', 'Create Stripe checkout session', { expectsJsonBody: true }),
+      cmd('webhook', 'POST', '/stripe/webhook', 'Send Stripe webhook payload', { expectsJsonBody: true }),
     ],
   },
   {

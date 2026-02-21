@@ -469,6 +469,52 @@ export function saveSecrets(s: Record<string, any>) {
   saveCollection('secrets', s)
 }
 
+export async function getSecret(key: string): Promise<{
+  id: string
+  name: string
+  service: string
+  value: string
+  scope: string
+  agentIds: string[]
+  createdAt: number
+  updatedAt: number
+} | null> {
+  const needle = typeof key === 'string' ? key.trim().toLowerCase() : ''
+  if (!needle) return null
+
+  const secrets = loadSecrets()
+  const matches = Object.values(secrets).find((secret: any) => {
+    if (!secret || typeof secret !== 'object') return false
+    const id = typeof secret.id === 'string' ? secret.id.toLowerCase() : ''
+    const name = typeof secret.name === 'string' ? secret.name.toLowerCase() : ''
+    const service = typeof secret.service === 'string' ? secret.service.toLowerCase() : ''
+    return id === needle || name === needle || service === needle
+  }) as any | undefined
+
+  if (!matches) return null
+
+  try {
+    const decryptedValue =
+      typeof matches.encryptedValue === 'string'
+        ? decryptKey(matches.encryptedValue)
+        : (typeof matches.value === 'string' ? matches.value : '')
+    if (!decryptedValue) return null
+
+    return {
+      id: matches.id,
+      name: matches.name,
+      service: matches.service,
+      value: decryptedValue,
+      scope: matches.scope,
+      agentIds: Array.isArray(matches.agentIds) ? matches.agentIds : [],
+      createdAt: matches.createdAt,
+      updatedAt: matches.updatedAt,
+    }
+  } catch {
+    return null
+  }
+}
+
 // --- Provider Configs (custom providers) ---
 export function loadProviderConfigs(): Record<string, any> {
   return loadCollection('provider_configs')

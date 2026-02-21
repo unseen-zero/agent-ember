@@ -51,6 +51,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         mode: queueMode,
         position: run.position,
         deduped: run.deduped || false,
+        coalesced: run.coalesced || false,
       })
 
       writeEvent({
@@ -58,7 +59,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         text: JSON.stringify({
           run: {
             id: run.runId,
-            status: run.deduped ? 'deduped' : 'queued',
+            status: run.deduped ? 'deduped' : run.coalesced ? 'coalesced' : 'queued',
             position: run.position,
             internal,
             mode: queueMode,
