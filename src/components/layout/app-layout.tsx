@@ -353,28 +353,24 @@ export function AppLayout() {
               <h2 className="font-display text-[14px] font-600 text-foreground tracking-[-0.01em] uppercase opacity-40 flex-1">
                 {activeView === 'settings' ? 'App Settings' : activeView === 'logs' ? 'System Logs' : activeView}
               </h2>
+              {activeView !== 'logs' && activeView !== 'settings' && (
+                <button
+                  onClick={openNewSheet}
+                  className="w-7 h-7 rounded-[8px] bg-primary/10 text-primary border border-primary/20 flex items-center justify-center cursor-pointer hover:bg-primary/20 transition-all shrink-0"
+                  title={`New ${activeView === 'sessions' ? 'Session' : activeView === 'agents' ? 'Agent' : activeView === 'schedules' ? 'Schedule' : activeView === 'tasks' ? 'Task' : activeView === 'secrets' ? 'Secret' : activeView === 'providers' ? 'Provider' : activeView === 'skills' ? 'Skill' : activeView === 'connectors' ? 'Connector' : activeView === 'webhooks' ? 'Webhook' : 'Entry'}`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                </button>
+              )}
             </div>
             {activeView === 'sessions' && (
               <>
                 <UpdateBanner />
                 <NetworkBanner />
                 <SessionList inSidebar onSelect={() => { }} />
-                {Object.keys(sessions).filter(id => sessions[id].name !== '__main__').length > 0 && (
-                  <div className="px-3 pb-3 shrink-0">
-                    <button
-                      onClick={openNewSheet}
-                      className="w-full py-2.5 rounded-[12px] bg-primary/10 text-primary border border-primary/20
-                        text-[13px] font-600 cursor-pointer hover:bg-primary/20 transition-all flex items-center justify-center gap-2"
-                      style={{ fontFamily: 'inherit' }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                        <line x1="12" y1="5" x2="12" y2="19" />
-                        <line x1="5" y1="12" x2="19" y2="12" />
-                      </svg>
-                      New Session
-                    </button>
-                  </div>
-                )}
               </>
             )}
             {activeView === 'agents' && <AgentList inSidebar />}

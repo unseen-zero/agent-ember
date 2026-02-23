@@ -96,7 +96,7 @@ export function SessionCard({ session, active, onClick }: Props) {
             title={`${connector.name} (${connector.platform})`}
           />
         )}
-        <span className="font-display text-[14px] font-600 truncate flex-1 tracking-[-0.01em]">{session.name}</span>
+        <span className="font-display text-[14px] font-600 truncate flex-1 tracking-[-0.01em] text-primary">{session.name}</span>
         {session.sessionType === 'orchestrated' && (
           <span className="shrink-0 text-[10px] font-600 uppercase tracking-wider text-amber-400/80 bg-amber-400/[0.08] px-2 py-0.5 rounded-[6px]">
             AI
